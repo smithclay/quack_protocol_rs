@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  QUACK_SERVER_URI: quack:127.0.0.1:9495
+  QUACK_AUTH_TOKEN: super_secret
+
+jobs:
+  test:
+    name: clippy, tests, and live Quack integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add rustfmt clippy
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Install DuckDB CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.zip \
+            -o "$RUNNER_TEMP/duckdb_cli-linux-amd64.zip"
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          unzip -q "$RUNNER_TEMP/duckdb_cli-linux-amd64.zip" -d "$RUNNER_TEMP/duckdb"
+          chmod +x "$RUNNER_TEMP/duckdb/duckdb"
+          echo "$RUNNER_TEMP/duckdb" >> "$GITHUB_PATH"
+
+      - name: Start local Quack server
+        run: |
+          set -euo pipefail
+          startup_sql="INSTALL quack FROM core_nightly; LOAD quack; CALL quack_serve('${QUACK_SERVER_URI}', token = '${QUACK_AUTH_TOKEN}');"
+          tail -f /dev/null | duckdb -init /dev/null -cmd "$startup_sql" > "$RUNNER_TEMP/quack-server.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/quack-server.pid"
+          for _ in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:9495/" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/quack-server.log"
+          exit 1
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+      - name: Stop local Quack server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/quack-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/quack-server.pid")" || true
+          fi
+
+      - name: Upload Quack server log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quack-server-log
+          path: ${{ runner.temp }}/quack-server.log
+          if-no-files-found: ignore
