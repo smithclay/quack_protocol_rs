@@ -4,24 +4,37 @@
 //! `BinarySerializer`-compatible message, logical type, and `DataChunk` codecs
 //! needed by a Quack client.
 
-pub mod binary;
-pub mod builders;
-pub mod client;
-pub mod constants;
-pub mod errors;
-pub mod json;
-pub mod logical_types;
-pub mod messages;
-pub mod sql;
-pub mod values;
-pub mod vector;
+mod binary;
+mod builders;
+mod client;
+mod constants;
+mod errors;
+mod json;
+mod logical_types;
+mod messages;
+mod sql;
+mod values;
+mod vector;
 
-pub use builders::*;
-pub use client::*;
+pub use builders::{ColumnDefinition, ColumnInput, column, data_chunk, data_chunk_from_rows};
+pub use client::{QuackClient, QuackClientOptions, QuackConnectionInfo, QuackQueryResult};
 pub use errors::{QuackError, Result};
-pub use json::*;
-pub use logical_types::*;
-pub use messages::*;
-pub use sql::*;
-pub use values::*;
-pub use vector::*;
+pub use json::{
+    BigIntJsonMode, BytesJsonMode, JsonOptions, TaggedJsonMode, to_json_row, to_json_rows,
+    to_json_value,
+};
+pub use logical_types::{
+    ChildType, CoordinateReferenceSystem, ExtraTypeInfo, LogicalType, LogicalTypeId, LogicalTypes,
+};
+pub use sql::{SqlParameter, SqlParameters, format_sql, sql_literal};
+pub use values::{
+    date_from_iso_date, date_value, decimal_value, interval_value, time_tz_value, time_value,
+    timestamp_value,
+};
+pub use vector::{
+    DataChunk, DateValue, DecimalValue, IntervalValue, Row, TimeTzValue, TimeUnit, TimeValue,
+    TimestampUnit, TimestampValue, Value, decimal_to_string, rows_from_chunk,
+};
+
+#[cfg(test)]
+mod protocol_tests;

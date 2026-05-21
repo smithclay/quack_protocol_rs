@@ -6,7 +6,7 @@ use crate::vector::{DataChunk, decode_data_chunk_wrapper, encode_data_chunk_wrap
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
-pub enum MessageType {
+pub(crate) enum MessageType {
     Invalid = 0,
     ConnectionRequest = 1,
     ConnectionResponse = 2,
@@ -46,14 +46,14 @@ impl TryFrom<u64> for MessageType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MessageHeader {
-    pub message_type: MessageType,
-    pub connection_id: Option<String>,
-    pub client_query_id: Option<u64>,
+pub(crate) struct MessageHeader {
+    pub(crate) message_type: MessageType,
+    pub(crate) connection_id: Option<String>,
+    pub(crate) client_query_id: Option<u64>,
 }
 
 impl MessageHeader {
-    pub fn new(message_type: MessageType) -> Self {
+    pub(crate) fn new(message_type: MessageType) -> Self {
         Self {
             message_type,
             connection_id: None,
@@ -61,19 +61,19 @@ impl MessageHeader {
         }
     }
 
-    pub fn with_connection(mut self, connection_id: impl Into<String>) -> Self {
+    pub(crate) fn with_connection(mut self, connection_id: impl Into<String>) -> Self {
         self.connection_id = Some(connection_id.into());
         self
     }
 
-    pub fn with_client_query_id(mut self, client_query_id: u64) -> Self {
+    pub(crate) fn with_client_query_id(mut self, client_query_id: u64) -> Self {
         self.client_query_id = Some(client_query_id);
         self
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum QuackMessage {
+pub(crate) enum QuackMessage {
     ConnectionRequest {
         header: MessageHeader,
         auth_string: Option<String>,
@@ -128,7 +128,7 @@ pub enum QuackMessage {
 }
 
 impl QuackMessage {
-    pub fn header(&self) -> &MessageHeader {
+    pub(crate) fn header(&self) -> &MessageHeader {
         match self {
             Self::ConnectionRequest { header, .. }
             | Self::ConnectionResponse { header, .. }
@@ -143,19 +143,19 @@ impl QuackMessage {
         }
     }
 
-    pub fn message_type(&self) -> MessageType {
+    pub(crate) fn message_type(&self) -> MessageType {
         self.header().message_type
     }
 }
 
-pub fn encode_message(message: &QuackMessage) -> Result<Vec<u8>> {
+pub(crate) fn encode_message(message: &QuackMessage) -> Result<Vec<u8>> {
     let mut writer = BinaryWriter::new();
     encode_header(&mut writer, message.header())?;
     encode_body(&mut writer, message)?;
     Ok(writer.into_bytes())
 }
 
-pub fn decode_message(bytes: &[u8]) -> Result<QuackMessage> {
+pub(crate) fn decode_message(bytes: &[u8]) -> Result<QuackMessage> {
     let mut reader = BinaryReader::new(bytes);
     let header = decode_header(&mut reader)?;
     let message = decode_body(&mut reader, header)?;
@@ -163,7 +163,7 @@ pub fn decode_message(bytes: &[u8]) -> Result<QuackMessage> {
     Ok(message)
 }
 
-pub fn encode_header(writer: &mut BinaryWriter, header: &MessageHeader) -> Result<()> {
+pub(crate) fn encode_header(writer: &mut BinaryWriter, header: &MessageHeader) -> Result<()> {
     writer.write_object(|object| {
         object.write_field(1, |object| object.write_uleb(header.message_type as u64))?;
         if let Some(connection_id) = header
@@ -180,7 +180,7 @@ pub fn encode_header(writer: &mut BinaryWriter, header: &MessageHeader) -> Resul
     })
 }
 
-pub fn decode_header(reader: &mut BinaryReader<'_>) -> Result<MessageHeader> {
+pub(crate) fn decode_header(reader: &mut BinaryReader<'_>) -> Result<MessageHeader> {
     reader.read_object(|object| {
         let message_type =
             MessageType::try_from(object.read_required_field(1, |object| object.read_uleb_u64())?)?;

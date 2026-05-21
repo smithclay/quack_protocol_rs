@@ -13,7 +13,7 @@ use crate::logical_types::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
-pub enum VectorType {
+pub(crate) enum VectorType {
     Flat = 0,
     Fsst = 1,
     Constant = 2,
@@ -176,17 +176,17 @@ impl From<Vec<u8>> for Value {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DecodedVector {
-    pub logical_type: LogicalType,
-    pub vector_type: VectorType,
-    pub values: Vec<Value>,
+pub(crate) struct DecodedVector {
+    pub(crate) logical_type: LogicalType,
+    pub(crate) vector_type: VectorType,
+    pub(crate) values: Vec<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DataChunk {
     pub row_count: usize,
     pub types: Vec<LogicalType>,
-    pub columns: Vec<DecodedVector>,
+    pub(crate) columns: Vec<DecodedVector>,
     pub column_names: Option<Vec<String>>,
 }
 
@@ -198,18 +198,21 @@ struct ListEntry {
     length: usize,
 }
 
-pub fn decode_data_chunk_wrapper(reader: &mut BinaryReader<'_>) -> Result<DataChunk> {
+pub(crate) fn decode_data_chunk_wrapper(reader: &mut BinaryReader<'_>) -> Result<DataChunk> {
     reader.read_object(|object| object.read_required_field(300, decode_data_chunk))
 }
 
-pub fn encode_data_chunk_wrapper(writer: &mut BinaryWriter, chunk: &DataChunk) -> Result<()> {
+pub(crate) fn encode_data_chunk_wrapper(
+    writer: &mut BinaryWriter,
+    chunk: &DataChunk,
+) -> Result<()> {
     writer.write_object(|object| {
         object.write_field(300, |object| encode_data_chunk(object, chunk))?;
         Ok(())
     })
 }
 
-pub fn decode_data_chunk(reader: &mut BinaryReader<'_>) -> Result<DataChunk> {
+pub(crate) fn decode_data_chunk(reader: &mut BinaryReader<'_>) -> Result<DataChunk> {
     reader.read_object(|object| {
         let row_count = object.read_required_field(100, |object| object.read_uleb_usize())?;
         let types = object.read_required_field(101, |object| {
@@ -241,7 +244,7 @@ pub fn decode_data_chunk(reader: &mut BinaryReader<'_>) -> Result<DataChunk> {
     })
 }
 
-pub fn encode_data_chunk(writer: &mut BinaryWriter, chunk: &DataChunk) -> Result<()> {
+pub(crate) fn encode_data_chunk(writer: &mut BinaryWriter, chunk: &DataChunk) -> Result<()> {
     if chunk.types.len() != chunk.columns.len() {
         return Err(QuackError::protocol(
             "DataChunk type count must match column count",
@@ -273,7 +276,7 @@ pub fn encode_data_chunk(writer: &mut BinaryWriter, chunk: &DataChunk) -> Result
     })
 }
 
-pub fn decode_vector(
+pub(crate) fn decode_vector(
     reader: &mut BinaryReader<'_>,
     logical_type: &LogicalType,
     count: usize,
@@ -281,7 +284,7 @@ pub fn decode_vector(
     reader.read_object(|object| decode_vector_body(object, logical_type, count))
 }
 
-pub fn encode_vector(
+pub(crate) fn encode_vector(
     writer: &mut BinaryWriter,
     logical_type: &LogicalType,
     values: &[Value],
@@ -299,7 +302,7 @@ pub fn rows_from_chunk(chunk: &DataChunk) -> Result<Vec<Row>> {
     rows_from_chunk_with_names(chunk, &names)
 }
 
-pub fn rows_from_chunk_with_names(chunk: &DataChunk, names: &[String]) -> Result<Vec<Row>> {
+pub(crate) fn rows_from_chunk_with_names(chunk: &DataChunk, names: &[String]) -> Result<Vec<Row>> {
     let mut rows = Vec::with_capacity(chunk.row_count);
     for row_index in 0..chunk.row_count {
         let mut row = Row::new();
@@ -316,7 +319,10 @@ pub fn rows_from_chunk_with_names(chunk: &DataChunk, names: &[String]) -> Result
     Ok(rows)
 }
 
-pub fn chunks_to_rows(chunks: &[DataChunk], column_names: Option<&[String]>) -> Result<Vec<Row>> {
+pub(crate) fn chunks_to_rows(
+    chunks: &[DataChunk],
+    column_names: Option<&[String]>,
+) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
     for chunk in chunks {
         rows.extend(match column_names {
@@ -1079,7 +1085,7 @@ fn decimal_from_unscaled(logical_type: &LogicalType, value: i128) -> Result<Deci
     }
 }
 
-pub fn decimal_to_unscaled(logical_type: &LogicalType, value: &Value) -> Result<i128> {
+pub(crate) fn decimal_to_unscaled(logical_type: &LogicalType, value: &Value) -> Result<i128> {
     match value {
         Value::Decimal(value) => Ok(value.value),
         Value::String(value) => parse_decimal_string(logical_type, value),

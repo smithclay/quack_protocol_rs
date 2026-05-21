@@ -17,15 +17,15 @@ pub enum QuackError {
 }
 
 impl QuackError {
-    pub fn protocol(message: impl Into<String>) -> Self {
+    pub(crate) fn protocol(message: impl Into<String>) -> Self {
         Self::Protocol(message.into())
     }
 
-    pub fn server(message: impl Into<String>) -> Self {
+    pub(crate) fn server(message: impl Into<String>) -> Self {
         Self::Server(message.into())
     }
 
-    pub fn unsupported(message: impl Into<String>) -> Self {
+    pub(crate) fn unsupported(message: impl Into<String>) -> Self {
         Self::UnsupportedType(message.into())
     }
 }

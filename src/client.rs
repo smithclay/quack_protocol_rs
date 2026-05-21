@@ -11,11 +11,11 @@ use crate::sql::{SqlParameters, format_sql};
 use crate::vector::{DataChunk, Row, Value, chunks_to_rows};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ParsedQuackUri {
-    pub base_url: String,
-    pub host: String,
-    pub port: u16,
-    pub ssl: bool,
+pub(crate) struct ParsedQuackUri {
+    pub(crate) base_url: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) ssl: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -41,7 +41,7 @@ pub struct QuackConnectionInfo {
 pub struct QuackQueryResult {
     pub names: Vec<String>,
     pub types: Vec<crate::logical_types::LogicalType>,
-    pub chunks: Vec<DataChunk>,
+    pub(crate) chunks: Vec<DataChunk>,
 }
 
 impl QuackQueryResult {
@@ -68,7 +68,7 @@ impl QuackQueryResult {
 
 #[derive(Clone, Debug)]
 pub struct QuackClient {
-    pub base_url: String,
+    pub(crate) base_url: String,
     pub info: Option<QuackConnectionInfo>,
     http: reqwest::Client,
     headers: HeaderMap,
@@ -283,7 +283,7 @@ impl QuackClient {
         self.disconnect().await
     }
 
-    pub async fn send(&self, message: &QuackMessage) -> Result<QuackMessage> {
+    pub(crate) async fn send(&self, message: &QuackMessage) -> Result<QuackMessage> {
         let bytes = encode_message(message)?;
         let mut request = self
             .http
@@ -355,7 +355,7 @@ impl QuackClient {
     }
 }
 
-pub fn parse_quack_uri(input: &str, ssl_override: Option<bool>) -> Result<ParsedQuackUri> {
+pub(crate) fn parse_quack_uri(input: &str, ssl_override: Option<bool>) -> Result<ParsedQuackUri> {
     let uri = input.trim();
     if uri.is_empty() {
         return Err(QuackError::protocol("Quack URI is empty"));

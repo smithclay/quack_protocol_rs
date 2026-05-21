@@ -1,5 +1,13 @@
 use indexmap::IndexMap;
-use quack_protocol::*;
+
+use crate::binary;
+use crate::client::{ParsedQuackUri, parse_quack_uri};
+use crate::messages::{MessageHeader, MessageType, QuackMessage, decode_message, encode_message};
+use crate::sql::{format_sql, sql_literal};
+use crate::vector::{
+    decode_data_chunk, encode_data_chunk, rows_from_chunk, rows_from_chunk_with_names,
+};
+use crate::*;
 
 fn some_name(name: &str) -> Option<String> {
     Some(name.to_string())
@@ -21,7 +29,9 @@ fn binary_round_trips_objects_and_primitives() {
             object.write_field(1, |object| object.write_string("hello"))?;
             object.write_field(2, |object| object.write_sleb(-12345i64))?;
             object.write_field(3, |object| object.write_uleb(987654321u64))?;
-            object.write_field(4, |object| object.write_huge_i128(-42))?;
+            object.write_field(4, |object| {
+                object.write_huge_int_parts(binary::split_signed_huge_int(-42))
+            })?;
             Ok(())
         })
         .unwrap();

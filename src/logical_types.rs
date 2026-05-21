@@ -3,7 +3,7 @@ use crate::errors::{QuackError, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
-pub enum PhysicalType {
+pub(crate) enum PhysicalType {
     Bool = 1,
     UInt8 = 2,
     Int8 = 3,
@@ -22,7 +22,6 @@ pub enum PhysicalType {
     Varchar = 200,
     UInt128 = 203,
     Int128 = 204,
-    Unknown = 205,
     Bit = 206,
     Invalid = 255,
 }
@@ -152,7 +151,7 @@ impl TryFrom<u64> for LogicalTypeId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
-pub enum ExtraTypeInfoType {
+pub(crate) enum ExtraTypeInfoType {
     Invalid = 0,
     Generic = 1,
     Decimal = 2,
@@ -279,7 +278,7 @@ pub enum ExtraTypeInfo {
 }
 
 impl ExtraTypeInfo {
-    pub fn type_id(&self) -> ExtraTypeInfoType {
+    pub(crate) fn type_id(&self) -> ExtraTypeInfoType {
         match self {
             Self::Invalid { .. } => ExtraTypeInfoType::Invalid,
             Self::Generic { .. } => ExtraTypeInfoType::Generic,
@@ -318,14 +317,14 @@ impl ExtraTypeInfo {
     }
 }
 
-pub fn logical_type(id: LogicalTypeId) -> LogicalType {
+pub(crate) fn logical_type(id: LogicalTypeId) -> LogicalType {
     LogicalType {
         id,
         type_info: None,
     }
 }
 
-pub fn logical_type_with_info(id: LogicalTypeId, type_info: ExtraTypeInfo) -> LogicalType {
+pub(crate) fn logical_type_with_info(id: LogicalTypeId, type_info: ExtraTypeInfo) -> LogicalType {
     LogicalType {
         id,
         type_info: Some(type_info),
@@ -504,7 +503,10 @@ impl LogicalType {
     }
 }
 
-pub fn encode_logical_type(writer: &mut BinaryWriter, logical_type: &LogicalType) -> Result<()> {
+pub(crate) fn encode_logical_type(
+    writer: &mut BinaryWriter,
+    logical_type: &LogicalType,
+) -> Result<()> {
     writer.write_object(|object| {
         object.write_field(100, |object| object.write_uleb(logical_type.id as u64))?;
         if let Some(info) = &logical_type.type_info {
@@ -516,7 +518,7 @@ pub fn encode_logical_type(writer: &mut BinaryWriter, logical_type: &LogicalType
     })
 }
 
-pub fn decode_logical_type(reader: &mut BinaryReader<'_>) -> Result<LogicalType> {
+pub(crate) fn decode_logical_type(reader: &mut BinaryReader<'_>) -> Result<LogicalType> {
     reader.read_object(|object| {
         let id = LogicalTypeId::try_from(
             object.read_required_field(100, |object| object.read_uleb_u64())?,
@@ -530,7 +532,10 @@ pub fn decode_logical_type(reader: &mut BinaryReader<'_>) -> Result<LogicalType>
     })
 }
 
-pub fn encode_extra_type_info(writer: &mut BinaryWriter, info: &ExtraTypeInfo) -> Result<()> {
+pub(crate) fn encode_extra_type_info(
+    writer: &mut BinaryWriter,
+    info: &ExtraTypeInfo,
+) -> Result<()> {
     writer.write_object(|object| {
         object.write_field(100, |object| object.write_uleb(info.type_id() as u64))?;
         if let Some(alias) = info.alias().filter(|alias| !alias.is_empty()) {
@@ -619,7 +624,7 @@ pub fn encode_extra_type_info(writer: &mut BinaryWriter, info: &ExtraTypeInfo) -
     })
 }
 
-pub fn decode_extra_type_info(reader: &mut BinaryReader<'_>) -> Result<ExtraTypeInfo> {
+pub(crate) fn decode_extra_type_info(reader: &mut BinaryReader<'_>) -> Result<ExtraTypeInfo> {
     reader.read_object(|object| {
         let type_id = ExtraTypeInfoType::try_from(object.read_required_field(100, |object| object.read_uleb_u64())?)?;
         let alias = object.read_optional_field(
@@ -732,7 +737,7 @@ pub fn decode_extra_type_info(reader: &mut BinaryReader<'_>) -> Result<ExtraType
     })
 }
 
-pub fn get_physical_type(logical_type: &LogicalType) -> Result<PhysicalType> {
+pub(crate) fn get_physical_type(logical_type: &LogicalType) -> Result<PhysicalType> {
     Ok(match logical_type.id {
         LogicalTypeId::Boolean => PhysicalType::Bool,
         LogicalTypeId::TinyInt => PhysicalType::Int8,
@@ -779,7 +784,7 @@ pub fn get_physical_type(logical_type: &LogicalType) -> Result<PhysicalType> {
     })
 }
 
-pub fn is_constant_size_physical_type(physical_type: PhysicalType) -> bool {
+pub(crate) fn is_constant_size_physical_type(physical_type: PhysicalType) -> bool {
     matches!(
         physical_type,
         PhysicalType::Bool
@@ -799,7 +804,7 @@ pub fn is_constant_size_physical_type(physical_type: PhysicalType) -> bool {
     )
 }
 
-pub fn physical_type_size(physical_type: PhysicalType) -> Result<usize> {
+pub(crate) fn physical_type_size(physical_type: PhysicalType) -> Result<usize> {
     Ok(match physical_type {
         PhysicalType::Bool | PhysicalType::UInt8 | PhysicalType::Int8 => 1,
         PhysicalType::UInt16 | PhysicalType::Int16 => 2,
@@ -814,7 +819,7 @@ pub fn physical_type_size(physical_type: PhysicalType) -> Result<usize> {
     })
 }
 
-pub fn get_child_type(logical_type: &LogicalType) -> Result<&LogicalType> {
+pub(crate) fn get_child_type(logical_type: &LogicalType) -> Result<&LogicalType> {
     match logical_type.type_info.as_ref() {
         Some(ExtraTypeInfo::List { child_type, .. })
         | Some(ExtraTypeInfo::Array { child_type, .. }) => Ok(child_type),
@@ -825,7 +830,7 @@ pub fn get_child_type(logical_type: &LogicalType) -> Result<&LogicalType> {
     }
 }
 
-pub fn get_struct_children(logical_type: &LogicalType) -> Result<&[ChildType]> {
+pub(crate) fn get_struct_children(logical_type: &LogicalType) -> Result<&[ChildType]> {
     match logical_type.type_info.as_ref() {
         Some(ExtraTypeInfo::Struct { child_types, .. }) => Ok(child_types),
         _ if matches!(
@@ -842,7 +847,7 @@ pub fn get_struct_children(logical_type: &LogicalType) -> Result<&[ChildType]> {
     }
 }
 
-pub fn get_array_size(logical_type: &LogicalType) -> Result<u64> {
+pub(crate) fn get_array_size(logical_type: &LogicalType) -> Result<u64> {
     match logical_type.type_info.as_ref() {
         Some(ExtraTypeInfo::Array { size, .. }) => Ok(*size),
         _ => Err(QuackError::protocol(format!(
@@ -852,7 +857,7 @@ pub fn get_array_size(logical_type: &LogicalType) -> Result<u64> {
     }
 }
 
-pub fn get_enum_values(logical_type: &LogicalType) -> Result<&[String]> {
+pub(crate) fn get_enum_values(logical_type: &LogicalType) -> Result<&[String]> {
     match logical_type.type_info.as_ref() {
         Some(ExtraTypeInfo::Enum { values, .. }) => Ok(values),
         _ => Err(QuackError::protocol(format!(
