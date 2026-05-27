@@ -10,6 +10,9 @@ use crate::messages::{MessageHeader, MessageType, QuackMessage, decode_message, 
 use crate::sql::{SqlParameters, format_sql};
 use crate::vector::{DataChunk, Row, Value, chunks_to_rows};
 
+const DEFAULT_QUACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_QUACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ParsedQuackUri {
     pub(crate) base_url: String,
@@ -18,7 +21,7 @@ pub(crate) struct ParsedQuackUri {
     pub(crate) ssl: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct QuackClientOptions {
     pub auth_token: Option<String>,
     pub client_duckdb_version: Option<String>,
@@ -28,6 +31,21 @@ pub struct QuackClientOptions {
     pub ssl: Option<bool>,
     pub timeout: Option<Duration>,
     pub headers: HeaderMap,
+}
+
+impl Default for QuackClientOptions {
+    fn default() -> Self {
+        Self {
+            auth_token: None,
+            client_duckdb_version: None,
+            client_platform: None,
+            min_supported_quack_version: None,
+            max_supported_quack_version: None,
+            ssl: None,
+            timeout: Some(DEFAULT_QUACK_REQUEST_TIMEOUT),
+            headers: HeaderMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -72,7 +90,7 @@ pub struct QuackClient {
     pub info: Option<QuackConnectionInfo>,
     http: reqwest::Client,
     headers: HeaderMap,
-    timeout: Option<Duration>,
+    timeout: Duration,
     connection_id: Option<String>,
     closed: bool,
     next_query_id: u64,
@@ -81,12 +99,17 @@ pub struct QuackClient {
 impl QuackClient {
     pub async fn connect(uri: &str, options: QuackClientOptions) -> Result<Self> {
         let parsed = parse_quack_uri(uri, options.ssl)?;
+        let timeout = options.timeout.unwrap_or(DEFAULT_QUACK_REQUEST_TIMEOUT);
+        let http = reqwest::Client::builder()
+            .connect_timeout(DEFAULT_QUACK_CONNECT_TIMEOUT.min(timeout))
+            .timeout(timeout)
+            .build()?;
         let mut client = Self {
             base_url: parsed.base_url.trim_end_matches('/').to_string(),
             info: None,
-            http: reqwest::Client::new(),
+            http,
             headers: options.headers.clone(),
-            timeout: options.timeout,
+            timeout,
             connection_id: None,
             closed: false,
             next_query_id: 1,
@@ -294,9 +317,7 @@ impl QuackClient {
         if !self.headers.is_empty() {
             request = request.headers(self.headers.clone());
         }
-        if let Some(timeout) = self.timeout {
-            request = request.timeout(timeout);
-        }
+        request = request.timeout(self.timeout);
         let response = request.send().await?;
         if !response.status().is_success() {
             return Err(QuackError::protocol(format!(
@@ -465,5 +486,18 @@ fn expect_success(response: QuackMessage) -> Result<()> {
             "expected SUCCESS_RESPONSE, got {:?}",
             other.message_type()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_options_have_request_timeout() {
+        assert_eq!(
+            QuackClientOptions::default().timeout,
+            Some(DEFAULT_QUACK_REQUEST_TIMEOUT)
+        );
     }
 }
