@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use futures_util::TryStreamExt;
 use indexmap::IndexMap;
 use quack_protocol::*;
 
@@ -51,7 +52,7 @@ fn assert_decimal(value: &Value, unscaled: i128, width: u64, scale: u64) {
 
 #[tokio::test]
 async fn live_quack_basic_query_when_configured() -> Result<()> {
-    let Some(mut client) = live_client().await? else {
+    let Some(client) = live_client().await? else {
         return Ok(());
     };
 
@@ -66,16 +67,27 @@ async fn live_quack_basic_query_when_configured() -> Result<()> {
             ) AS t(id, label)
             ORDER BY id
             ",
+            None,
         )
         .await?;
+    let (columns, rows) = result.into_rows();
+    let rows: Vec<Row> = rows.try_collect().await?;
 
-    assert_eq!(result.names, vec!["id", "label"]);
     assert_eq!(
-        result.types.iter().map(|typ| typ.id).collect::<Vec<_>>(),
-        vec![LogicalTypeId::Integer, LogicalTypeId::Varchar]
+        columns,
+        vec![
+            ColumnDefinition {
+                name: "id".to_string(),
+                logical_type: LogicalTypes::integer(),
+            },
+            ColumnDefinition {
+                name: "label".to_string(),
+                logical_type: LogicalTypes::varchar(),
+            },
+        ]
     );
     assert_eq!(
-        result.rows()?,
+        rows,
         vec![
             row(vec![
                 ("id", Value::Int(1)),
@@ -94,20 +106,33 @@ async fn live_quack_basic_query_when_configured() -> Result<()> {
 
 #[tokio::test]
 async fn live_quack_preserves_empty_result_schema() -> Result<()> {
-    let Some(mut client) = live_client().await? else {
+    let Some(client) = live_client().await? else {
         return Ok(());
     };
 
     let result = client
-        .query("SELECT 1::INTEGER AS id, 'x'::VARCHAR AS label WHERE FALSE")
+        .query(
+            "SELECT 1::INTEGER AS id, 'x'::VARCHAR AS label WHERE FALSE",
+            None,
+        )
         .await?;
+    let (columns, rows) = result.into_rows();
+    let rows: Vec<Row> = rows.try_collect().await?;
 
-    assert_eq!(result.names, vec!["id", "label"]);
     assert_eq!(
-        result.types.iter().map(|typ| typ.id).collect::<Vec<_>>(),
-        vec![LogicalTypeId::Integer, LogicalTypeId::Varchar]
+        columns,
+        vec![
+            ColumnDefinition {
+                name: "id".to_string(),
+                logical_type: LogicalTypes::integer(),
+            },
+            ColumnDefinition {
+                name: "label".to_string(),
+                logical_type: LogicalTypes::varchar(),
+            },
+        ]
     );
-    assert!(result.rows()?.is_empty());
+    assert!(rows.is_empty());
 
     client.disconnect().await?;
     Ok(())
@@ -115,19 +140,24 @@ async fn live_quack_preserves_empty_result_schema() -> Result<()> {
 
 #[tokio::test]
 async fn live_quack_round_trips_scalar_types() -> Result<()> {
-    let Some(mut client) = live_client().await? else {
+    let Some(client) = live_client().await? else {
         return Ok(());
     };
     let enum_name = unique_name("quack_rust_mood");
-    client
-        .query(&format!(
-            "CREATE TYPE {enum_name} AS ENUM ('sad', 'ok', 'happy')"
-        ))
-        .await?;
+    // The stream is lazy: DDL only executes once the stream is polled.
+    let (_, rows) = client
+        .query(
+            &format!("CREATE TYPE {enum_name} AS ENUM ('sad', 'ok', 'happy')"),
+            None,
+        )
+        .await?
+        .into_rows();
+    let _: Vec<Row> = rows.try_collect().await?;
 
     let result = client
-        .query(&format!(
-            "
+        .query(
+            &format!(
+                "
             SELECT
               TRUE AS bool_v,
               127::TINYINT AS tiny_v,
@@ -160,11 +190,19 @@ async fn live_quack_round_trips_scalar_types() -> Result<()> {
               INTERVAL '1 month 2 days 3 microseconds' AS interval_v,
               'ok'::{enum_name} AS enum_v
             "
-        ))
+            ),
+            None,
+        )
         .await?;
+    let (columns, rows) = result.into_rows();
+    let types: Vec<LogicalTypeId> = columns
+        .iter()
+        .map(|column| column.logical_type.id)
+        .collect();
+    let rows: Vec<Row> = rows.try_collect().await?;
 
     assert_eq!(
-        result.types.iter().map(|typ| typ.id).collect::<Vec<_>>(),
+        types,
         vec![
             LogicalTypeId::Boolean,
             LogicalTypeId::TinyInt,
@@ -199,7 +237,6 @@ async fn live_quack_round_trips_scalar_types() -> Result<()> {
         ]
     );
 
-    let rows = result.rows()?;
     let row = &rows[0];
     assert_eq!(row["bool_v"], Value::Bool(true));
     assert_eq!(row["tiny_v"], Value::Int(127));
@@ -301,7 +338,7 @@ async fn live_quack_round_trips_scalar_types() -> Result<()> {
 
 #[tokio::test]
 async fn live_quack_round_trips_nested_types() -> Result<()> {
-    let Some(mut client) = live_client().await? else {
+    let Some(client) = live_client().await? else {
         return Ok(());
     };
 
@@ -316,11 +353,18 @@ async fn live_quack_round_trips_nested_types() -> Result<()> {
               map(['a', 'b'], [1, 2]) AS map_v,
               array_value(7, 8, 9)::INTEGER[3] AS fixed_v
             ",
+            None,
         )
         .await?;
+    let (columns, rows) = result.into_rows();
+    let types: Vec<LogicalTypeId> = columns
+        .iter()
+        .map(|column| column.logical_type.id)
+        .collect();
+    let rows: Vec<Row> = rows.try_collect().await?;
 
     assert_eq!(
-        result.types.iter().map(|typ| typ.id).collect::<Vec<_>>(),
+        types,
         vec![
             LogicalTypeId::List,
             LogicalTypeId::List,
@@ -331,7 +375,6 @@ async fn live_quack_round_trips_nested_types() -> Result<()> {
         ]
     );
 
-    let rows = result.rows()?;
     let row = &rows[0];
     assert_eq!(
         row["ints"],
@@ -382,14 +425,20 @@ async fn live_quack_round_trips_nested_types() -> Result<()> {
 
 #[tokio::test]
 async fn live_quack_fetches_large_results_and_sequence_vectors() -> Result<()> {
-    let Some(mut client) = live_client().await? else {
+    let Some(client) = live_client().await? else {
         return Ok(());
     };
 
     let result = client
-        .query("SELECT i FROM range(5000) t(i) ORDER BY i")
+        .query("SELECT i FROM range(5000) t(i) ORDER BY i", None)
         .await?;
-    let values = result.values()?;
+    let (columns, rows) = result.into_rows();
+    let first_name = columns[0].name.as_str();
+    let rows: Vec<Row> = rows.try_collect().await?;
+    let values: Vec<Value> = rows
+        .iter()
+        .map(|row| row.get(first_name).cloned().unwrap_or(Value::Null))
+        .collect();
 
     assert_eq!(values.len(), 5000);
     assert_eq!(values.first(), Some(&Value::Int(0)));
@@ -402,7 +451,7 @@ async fn live_quack_fetches_large_results_and_sequence_vectors() -> Result<()> {
 
 #[tokio::test]
 async fn live_quack_supports_parameterized_queries() -> Result<()> {
-    let Some(mut client) = live_client().await? else {
+    let Some(client) = live_client().await? else {
         return Ok(());
     };
 
@@ -420,8 +469,10 @@ async fn live_quack_supports_parameterized_queries() -> Result<()> {
             ])),
         )
         .await?;
+    let (_, rows) = result.into_rows();
+    let rows: Vec<Row> = rows.try_collect().await?;
     assert_eq!(
-        result.rows()?,
+        rows,
         vec![row(vec![
             ("id", Value::Int(7)),
             ("label", Value::String("seven".to_string())),
@@ -441,8 +492,10 @@ async fn live_quack_supports_parameterized_queries() -> Result<()> {
             Some(&SqlParameters::Named(named)),
         )
         .await?;
+    let (_, rows) = result.into_rows();
+    let rows: Vec<Row> = rows.try_collect().await?;
     assert_eq!(
-        result.rows()?,
+        rows,
         vec![row(vec![
             ("id", Value::Int(8)),
             ("label", Value::String("eight".to_string())),
@@ -455,13 +508,15 @@ async fn live_quack_supports_parameterized_queries() -> Result<()> {
 
 #[tokio::test]
 async fn live_quack_appends_scalar_and_nested_rows() -> Result<()> {
-    let Some(mut client) = live_client().await? else {
+    let Some(client) = live_client().await? else {
         return Ok(());
     };
     let table = unique_name("quack_rust_append");
-    client
-        .query(&format!(
-            "
+    // The stream is lazy: DDL only executes once the stream is polled.
+    let (_, rows) = client
+        .query(
+            &format!(
+                "
             CREATE TEMP TABLE {table} (
               id INTEGER,
               label VARCHAR,
@@ -471,8 +526,12 @@ async fn live_quack_appends_scalar_and_nested_rows() -> Result<()> {
               fixed INTEGER[3]
             )
             "
-        ))
-        .await?;
+            ),
+            None,
+        )
+        .await?
+        .into_rows();
+    let _: Vec<Row> = rows.try_collect().await?;
 
     client
         .append_rows(
@@ -548,11 +607,13 @@ async fn live_quack_appends_scalar_and_nested_rows() -> Result<()> {
         .await?;
 
     let result = client
-        .query(&format!(
-            "SELECT id, label, amount, items, point, fixed FROM {table} ORDER BY id"
-        ))
+        .query(
+            &format!("SELECT id, label, amount, items, point, fixed FROM {table} ORDER BY id"),
+            None,
+        )
         .await?;
-    let rows = result.rows()?;
+    let (_, rows) = result.into_rows();
+    let rows: Vec<Row> = rows.try_collect().await?;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["id"], Value::Int(1));
     assert_eq!(rows[0]["label"], Value::String("one".to_string()));
@@ -582,14 +643,18 @@ async fn live_quack_appends_scalar_and_nested_rows() -> Result<()> {
 
 #[tokio::test]
 async fn live_quack_surfaces_server_errors() -> Result<()> {
-    let Some(mut client) = live_client().await? else {
+    let Some(client) = live_client().await? else {
         return Ok(());
     };
 
-    let error = client
-        .query("SELECT * FROM definitely_missing_quack_rust_table")
+    // PREPARE runs during query(), so the server error surfaces at the await.
+    let error = match client
+        .query("SELECT * FROM definitely_missing_quack_rust_table", None)
         .await
-        .expect_err("query should fail");
+    {
+        Err(error) => error,
+        Ok(_) => panic!("query should fail"),
+    };
     assert!(matches!(error, QuackError::Server(_)));
 
     client.disconnect().await?;
