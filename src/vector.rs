@@ -190,6 +190,14 @@ pub struct DataChunk {
     pub column_names: Option<Vec<String>>,
 }
 
+impl DataChunk {
+    pub fn column_values(&self, column: usize) -> Option<&[Value]> {
+        self.columns
+            .get(column)
+            .map(|vector| vector.values.as_slice())
+    }
+}
+
 pub type Row = IndexMap<String, Value>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
