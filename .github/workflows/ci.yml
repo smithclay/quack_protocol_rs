@@ -44,7 +44,7 @@ jobs:
       - name: Start local Quack server
         run: |
           set -euo pipefail
-          startup_sql="INSTALL quack FROM core_nightly; LOAD quack; CALL quack_serve('${QUACK_SERVER_URI}', token = '${QUACK_AUTH_TOKEN}');"
+          startup_sql="INSTALL quack; LOAD quack; CALL quack_serve('${QUACK_SERVER_URI}', token = '${QUACK_AUTH_TOKEN}');"
           tail -f /dev/null | duckdb -init /dev/null -cmd "$startup_sql" > "$RUNNER_TEMP/quack-server.log" 2>&1 &
           echo "$!" > "$RUNNER_TEMP/quack-server.pid"
           for _ in $(seq 1 60); do
