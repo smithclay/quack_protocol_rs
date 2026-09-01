@@ -76,4 +76,8 @@ The `arrow-array`, `arrow-buffer`, and `arrow-schema` crates are re-exported so
 downstream code can match versions. `TIMETZ`, `UNION`, and `VARINT` have no
 Arrow mapping yet and produce `QuackError::UnsupportedType`.
 
+Two mappings are provisional and may change in a future release: `MAP` is
+encoded as `List<Struct<key, value>>` rather than Arrow's native `Map`, and
+`ENUM` as plain `Utf8` rather than a `Dictionary`.
+
 Quack is still experimental upstream and not yet covered by a stable official wire spec. This implementation follows DuckDB's `duckdb-quack` extension.

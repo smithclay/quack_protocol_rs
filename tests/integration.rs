@@ -666,6 +666,8 @@ mod arrow_output {
     use std::sync::Arc;
 
     use futures_util::TryStreamExt;
+    use quack_protocol::arrow::arrow_array::cast::AsArray;
+    use quack_protocol::arrow::arrow_array::types::Int32Type;
     use quack_protocol::arrow::arrow_array::{
         Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Decimal256Array,
         FixedSizeListArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
@@ -687,14 +689,6 @@ mod arrow_output {
             .as_any()
             .downcast_ref::<T>()
             .unwrap_or_else(|| panic!("column {name} has an unexpected Arrow type"))
-    }
-
-    fn column_as_struct_field<T: Array + 'static>(array: &StructArray, index: usize) -> &T {
-        array
-            .column(index)
-            .as_any()
-            .downcast_ref::<T>()
-            .unwrap_or_else(|| panic!("struct child {index} has an unexpected Arrow type"))
     }
 
     #[tokio::test]
@@ -957,55 +951,51 @@ mod arrow_output {
 
         let ints = column_as::<ListArray>(batch, "ints").value(0);
         assert_eq!(
-            ints.as_any().downcast_ref::<Int32Array>().unwrap(),
+            ints.as_primitive::<Int32Type>(),
             &Int32Array::from(vec![Some(1), None, Some(3)])
         );
 
         let nested = column_as::<ListArray>(batch, "nested_ints").value(0);
-        let nested = nested.as_any().downcast_ref::<ListArray>().unwrap();
+        let nested = nested.as_list::<i32>();
         assert_eq!(nested.len(), 2);
         assert_eq!(
-            nested
-                .value(1)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .unwrap(),
+            nested.value(1).as_primitive::<Int32Type>(),
             &Int32Array::from(vec![3, 4])
         );
 
         let point = column_as::<StructArray>(batch, "point");
         assert_eq!(
-            column_as_struct_field::<Int32Array>(point, 0),
+            point.column(0).as_primitive::<Int32Type>(),
             &Int32Array::from(vec![1])
         );
         assert_eq!(
-            column_as_struct_field::<StringArray>(point, 1),
+            point.column(1).as_string::<i32>(),
             &StringArray::from(vec!["one"])
         );
 
         let points = column_as::<ListArray>(batch, "points").value(0);
-        let points = points.as_any().downcast_ref::<StructArray>().unwrap();
+        let points = points.as_struct();
         assert_eq!(points.len(), 2);
         assert!(points.is_null(1));
         assert_eq!(
-            column_as_struct_field::<StringArray>(points, 1),
+            points.column(1).as_string::<i32>(),
             &StringArray::from(vec![Some("five"), None])
         );
 
         let entries = column_as::<ListArray>(batch, "map_v").value(0);
-        let entries = entries.as_any().downcast_ref::<StructArray>().unwrap();
+        let entries = entries.as_struct();
         assert_eq!(
-            column_as_struct_field::<StringArray>(entries, 0),
+            entries.column(0).as_string::<i32>(),
             &StringArray::from(vec!["a", "b"])
         );
         assert_eq!(
-            column_as_struct_field::<Int32Array>(entries, 1),
+            entries.column(1).as_primitive::<Int32Type>(),
             &Int32Array::from(vec![1, 2])
         );
 
         let fixed = column_as::<FixedSizeListArray>(batch, "fixed_v").value(0);
         assert_eq!(
-            fixed.as_any().downcast_ref::<Int32Array>().unwrap(),
+            fixed.as_primitive::<Int32Type>(),
             &Int32Array::from(vec![7, 8, 9])
         );
 

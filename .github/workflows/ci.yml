@@ -30,7 +30,7 @@ jobs:
       - name: Run clippy
         run: |
           cargo clippy --locked --all-targets -- -D warnings
-          cargo clippy --locked --all-targets --features arrow -- -D warnings
+          cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Install DuckDB CLI
         run: |
@@ -59,7 +59,7 @@ jobs:
           exit 1
 
       - name: Run tests
-        run: cargo test --locked --all-targets --features arrow
+        run: cargo test --locked --all-targets --all-features
 
       - name: Stop local Quack server
         if: always()
