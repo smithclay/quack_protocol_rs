@@ -40,6 +40,8 @@ const LIST_ITEM_NAME: &str = "item";
 const HUGE_INT_PRECISION: u8 = 39;
 const UTC_TIMEZONE: &str = "UTC";
 const NANOS_PER_MICRO: i64 = 1_000;
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+const NANOS_PER_DAY: i64 = 86_400_000_000_000;
 
 /// Builds the Arrow schema of a query result from its column definitions.
 ///
@@ -299,22 +301,22 @@ fn build_array(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRef
         LogicalTypeId::Varchar
         | LogicalTypeId::Char
         | LogicalTypeId::Enum
-        | LogicalTypeId::Uuid => Arc::new(
-            collect(values, |value| match value {
+        | LogicalTypeId::Uuid => {
+            let values = collect(values, |value| match value {
                 Value::String(value) => Ok(value.as_str()),
                 other => Err(mismatch(logical_type, other)),
-            })?
-            .into_iter()
-            .collect::<StringArray>(),
-        ),
-        LogicalTypeId::Blob | LogicalTypeId::Geometry | LogicalTypeId::Bit => Arc::new(
-            collect(values, |value| match value {
+            })?;
+            check_byte_offsets(logical_type, &values)?;
+            Arc::new(values.into_iter().collect::<StringArray>())
+        }
+        LogicalTypeId::Blob | LogicalTypeId::Geometry | LogicalTypeId::Bit => {
+            let values = collect(values, |value| match value {
                 Value::Bytes(value) => Ok(value.as_slice()),
                 other => Err(mismatch(logical_type, other)),
-            })?
-            .into_iter()
-            .collect::<BinaryArray>(),
-        ),
+            })?;
+            check_byte_offsets(logical_type, &values)?;
+            Arc::new(values.into_iter().collect::<BinaryArray>())
+        }
         LogicalTypeId::Date => Arc::new(
             collect(values, |value| match value {
                 Value::Date(value) => Ok(value.days),
@@ -532,9 +534,38 @@ fn narrow_uint<T: TryFrom<u64>>(logical_type: &LogicalType, value: &Value) -> Re
 
 fn as_time(logical_type: &LogicalType, value: &Value, unit: TimeUnit) -> Result<i64> {
     match value {
-        Value::Time(value) if value.unit == unit => Ok(value.value),
+        Value::Time(value) if value.unit == unit => {
+            // DuckDB accepts TIME '24:00:00', which Arrow's "elapsed time since
+            // midnight" bound excludes.
+            let limit = match unit {
+                TimeUnit::Micros => MICROS_PER_DAY,
+                TimeUnit::Nanos => NANOS_PER_DAY,
+            };
+            if !(0..limit).contains(&value.value) {
+                return Err(out_of_range(logical_type, value.value));
+            }
+            Ok(value.value)
+        }
         other => Err(mismatch(logical_type, other)),
     }
+}
+
+fn check_byte_offsets<T: AsRef<[u8]>>(
+    logical_type: &LogicalType,
+    values: &[Option<T>],
+) -> Result<()> {
+    let total: usize = values
+        .iter()
+        .flatten()
+        .map(|value| value.as_ref().len())
+        .sum();
+    if total > i32::MAX as usize {
+        return Err(QuackError::protocol(format!(
+            "{:?} column of {total} bytes exceeds the Arrow 32-bit offset limit",
+            logical_type.id
+        )));
+    }
+    Ok(())
 }
 
 fn as_timestamp(
@@ -1150,6 +1181,24 @@ mod tests {
 
         assert!(
             matches!(&error, QuackError::UnsupportedType(message) if message.contains("TimeTz")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn times_outside_the_arrow_day_bound_are_rejected() {
+        let chunk = data_chunk(vec![column(
+            LogicalTypes::time(),
+            [time_value(MICROS_PER_DAY, TimeUnit::Micros)],
+            named("time_v"),
+        )])
+        .unwrap();
+        let schema = schema(&definitions(&chunk)).unwrap();
+
+        let error = to_record_batch(&chunk, &schema).unwrap_err();
+
+        assert!(
+            matches!(&error, QuackError::Protocol(message) if message.contains("out of range")),
             "unexpected error: {error}"
         );
     }
