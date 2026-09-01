@@ -73,8 +73,40 @@ async fn main() -> Result<()> {
 `quack_protocol::arrow` also exposes `schema()` and `to_record_batch()` for
 converting chunks by hand, plus `arrow_type()` for the `LogicalType` mapping.
 The `arrow-array`, `arrow-buffer`, and `arrow-schema` crates are re-exported so
-downstream code can match versions. `TIMETZ`, `UNION`, and `VARINT` have no
-Arrow mapping yet and produce `QuackError::UnsupportedType`.
+downstream code can match versions.
+
+The batch stream holds the client's connection until it is drained or dropped,
+as `into_chunks()` and `into_rows()` do: a `QuackClient` runs one query at a
+time, and a second query on the same client waits for the first stream to
+finish.
+
+### Type mapping
+
+| DuckDB | Arrow |
+|---|---|
+| `NULL` | `Null` |
+| `BOOLEAN` | `Boolean` |
+| `TINYINT` … `BIGINT` | `Int8` … `Int64` |
+| `UTINYINT` … `UBIGINT` | `UInt8` … `UInt64` |
+| `HUGEINT`, `UHUGEINT` | `Decimal256(39, 0)` |
+| `FLOAT`, `DOUBLE` | `Float32`, `Float64` |
+| `DECIMAL(w, s)` | `Decimal128(w, s)` |
+| `VARCHAR`, `CHAR`, `ENUM`, `UUID` | `Utf8` |
+| `BLOB`, `GEOMETRY`, `BIT` | `Binary` |
+| `DATE` | `Date32` |
+| `TIME`, `TIME_NS` | `Time64(Microsecond)`, `Time64(Nanosecond)` |
+| `TIMESTAMP_S`, `TIMESTAMP_MS`, `TIMESTAMP`, `TIMESTAMP_NS` | `Timestamp(<unit>, None)` |
+| `TIMESTAMPTZ` | `Timestamp(Microsecond, Some("UTC"))` |
+| `INTERVAL` | `Interval(MonthDayNano)` |
+| `LIST`, `MAP` | `List(child)` |
+| `ARRAY(n)` | `FixedSizeList(child, n)` |
+| `STRUCT` | `Struct(children)` |
+
+Every field is nullable; the wire carries no non-null guarantee. A `NULL` list,
+array, or struct is a null container, not an empty one. `TIME` values must lie
+within one day, as Arrow requires, so DuckDB's `TIME '24:00:00'` is rejected.
+`TIMETZ`, `UNION`, and `VARINT` have no Arrow mapping yet and produce
+`QuackError::UnsupportedType`.
 
 Two mappings are provisional and may change in a future release: `MAP` is
 encoded as `List<Struct<key, value>>` rather than Arrow's native `Map`, and

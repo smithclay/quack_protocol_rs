@@ -147,6 +147,10 @@ pub fn arrow_type(logical_type: &LogicalType) -> Result<DataType> {
 
 impl QuackResultStream {
     /// Consumes the stream as Arrow record batches sharing a single schema.
+    ///
+    /// Like `into_chunks()`, the returned stream holds the client's connection
+    /// until it is drained or dropped, so another query on the same client
+    /// waits for it to finish.
     pub fn into_record_batches(
         self,
     ) -> Result<(SchemaRef, BoxStream<'static, Result<RecordBatch>>)> {
