@@ -4,6 +4,7 @@
 //! [`arrow_array::RecordBatch`] using the column [`LogicalType`]s, so the wire
 //! codecs are untouched. It is gated behind the `arrow` feature.
 
+use std::iter::zip;
 use std::sync::Arc;
 
 use arrow_array::builder::{BinaryBuilder, BooleanBuilder, PrimitiveBuilder, StringBuilder};
@@ -68,7 +69,7 @@ pub fn to_record_batch(chunk: &DataChunk, schema: &SchemaRef) -> Result<RecordBa
         )));
     }
     let mut arrays = Vec::with_capacity(chunk.types.len());
-    for (index, logical_type) in chunk.types.iter().enumerate() {
+    for (index, (logical_type, field)) in zip(&chunk.types, schema.fields()).enumerate() {
         let values = chunk.column_values(index).ok_or_else(|| {
             QuackError::protocol(format!("DataChunk is missing column vector {index}"))
         })?;
@@ -81,6 +82,7 @@ pub fn to_record_batch(chunk: &DataChunk, schema: &SchemaRef) -> Result<RecordBa
         }
         arrays.push(build_array(
             logical_type,
+            field.data_type(),
             &values.iter().collect::<Vec<_>>(),
         )?);
     }
@@ -193,7 +195,14 @@ fn decimal_precision_and_scale(logical_type: &LogicalType) -> Result<(u8, i8)> {
     }
 }
 
-fn build_array(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRef> {
+/// Builds one column. `data_type` is the schema's type for the column, so
+/// nested builders reuse the schema's own field objects instead of rebuilding
+/// an identical field tree for every chunk.
+fn build_array(
+    logical_type: &LogicalType,
+    data_type: &DataType,
+    values: &[&Value],
+) -> Result<ArrayRef> {
     let id = logical_type.id;
     Ok(match id {
         LogicalTypeId::SqlNull => Arc::new(NullArray::new(values.len())),
@@ -308,14 +317,19 @@ fn build_array(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRef
                 as_interval(id, value)
             })?)
         }
-        LogicalTypeId::List | LogicalTypeId::Map => build_list(logical_type, values)?,
-        LogicalTypeId::Array => build_fixed_size_list(logical_type, values)?,
-        LogicalTypeId::Struct => build_struct(logical_type, values)?,
+        LogicalTypeId::List | LogicalTypeId::Map => {
+            build_list(logical_type, list_item(data_type)?, values)?
+        }
+        LogicalTypeId::Array => {
+            let (item, size) = fixed_size_list_item(data_type)?;
+            build_fixed_size_list(logical_type, item, size, values)?
+        }
+        LogicalTypeId::Struct => build_struct(logical_type, struct_children(data_type)?, values)?,
         other => return Err(unsupported(other)),
     })
 }
 
-fn build_list(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRef> {
+fn build_list(logical_type: &LogicalType, item: &FieldRef, values: &[&Value]) -> Result<ArrayRef> {
     let mut offsets = Vec::with_capacity(values.len() + 1);
     let mut validity = Vec::with_capacity(values.len());
     let mut items = Vec::with_capacity(values.len());
@@ -333,10 +347,10 @@ fn build_list(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRef>
             QuackError::protocol("LIST column exceeds the Arrow 32-bit offset limit")
         })?);
     }
-    let child = build_array(get_child_type(logical_type)?, &items)?;
+    let child = build_array(get_child_type(logical_type)?, item.data_type(), &items)?;
     Ok(Arc::new(
         ListArray::try_new(
-            list_item_field(logical_type)?,
+            item.clone(),
             OffsetBuffer::new(offsets.into()),
             child,
             Some(NullBuffer::from(validity)),
@@ -345,20 +359,26 @@ fn build_list(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRef>
     ))
 }
 
-fn build_fixed_size_list(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRef> {
-    let size = array_size(logical_type)?;
+fn build_fixed_size_list(
+    logical_type: &LogicalType,
+    item: &FieldRef,
+    size: i32,
+    values: &[&Value],
+) -> Result<ArrayRef> {
+    let width = usize::try_from(size)
+        .map_err(|_| QuackError::protocol(format!("Arrow schema declares ARRAY size {size}")))?;
     let mut validity = Vec::with_capacity(values.len());
-    let mut items = Vec::with_capacity(values.len() * size as usize);
+    let mut items = Vec::with_capacity(values.len() * width);
     for value in values {
         match *value {
             Value::Null => {
-                items.extend(std::iter::repeat_n(&NULL_VALUE, size as usize));
+                items.extend(std::iter::repeat_n(&NULL_VALUE, width));
                 validity.push(false);
             }
             Value::List(entries) => {
-                if entries.len() != size as usize {
+                if entries.len() != width {
                     return Err(QuackError::protocol(format!(
-                        "ARRAY value has {} entries, expected {size}",
+                        "ARRAY value has {} entries, expected {width}",
                         entries.len()
                     )));
                 }
@@ -368,19 +388,18 @@ fn build_fixed_size_list(logical_type: &LogicalType, values: &[&Value]) -> Resul
             other => return Err(mismatch(logical_type.id, other)),
         }
     }
-    let child = build_array(get_child_type(logical_type)?, &items)?;
+    let child = build_array(get_child_type(logical_type)?, item.data_type(), &items)?;
     Ok(Arc::new(
-        FixedSizeListArray::try_new(
-            list_item_field(logical_type)?,
-            size,
-            child,
-            Some(NullBuffer::from(validity)),
-        )
-        .map_err(arrow_error)?,
+        FixedSizeListArray::try_new(item.clone(), size, child, Some(NullBuffer::from(validity)))
+            .map_err(arrow_error)?,
     ))
 }
 
-fn build_struct(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRef> {
+fn build_struct(
+    logical_type: &LogicalType,
+    fields: &Fields,
+    values: &[&Value],
+) -> Result<ArrayRef> {
     let mut validity = Vec::with_capacity(values.len());
     for value in values {
         match *value {
@@ -390,8 +409,15 @@ fn build_struct(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRe
         }
     }
     let children = get_struct_children(logical_type)?;
+    if children.len() != fields.len() {
+        return Err(QuackError::protocol(format!(
+            "STRUCT has {} children but the Arrow schema declares {}",
+            children.len(),
+            fields.len()
+        )));
+    }
     let mut arrays = Vec::with_capacity(children.len());
-    for (child_index, child) in children.iter().enumerate() {
+    for (child_index, (child, field)) in zip(children, fields).enumerate() {
         // The decoder inserts struct fields in child order, so the positional
         // lookup hits and the lookup by name is only a fallback.
         let child_values = values
@@ -404,17 +430,42 @@ fn build_struct(logical_type: &LogicalType, values: &[&Value]) -> Result<ArrayRe
                 _ => &NULL_VALUE,
             })
             .collect::<Vec<_>>();
-        arrays.push(build_array(&child.logical_type, &child_values)?);
+        arrays.push(build_array(
+            &child.logical_type,
+            field.data_type(),
+            &child_values,
+        )?);
     }
     Ok(Arc::new(
         StructArray::try_new_with_length(
-            struct_fields(logical_type)?,
+            fields.clone(),
             arrays,
             Some(NullBuffer::from(validity)),
             values.len(),
         )
         .map_err(arrow_error)?,
     ))
+}
+
+fn list_item(data_type: &DataType) -> Result<&FieldRef> {
+    match data_type {
+        DataType::List(item) => Ok(item),
+        other => Err(schema_shape("List", other)),
+    }
+}
+
+fn fixed_size_list_item(data_type: &DataType) -> Result<(&FieldRef, i32)> {
+    match data_type {
+        DataType::FixedSizeList(item, size) => Ok((item, *size)),
+        other => Err(schema_shape("FixedSizeList", other)),
+    }
+}
+
+fn struct_children(data_type: &DataType) -> Result<&Fields> {
+    match data_type {
+        DataType::Struct(fields) => Ok(fields),
+        other => Err(schema_shape("Struct", other)),
+    }
 }
 
 fn primitive<'a, T: ArrowPrimitiveType>(
@@ -451,7 +502,7 @@ fn collect<'a, T>(
 ) -> Result<Vec<Option<T>>> {
     values
         .iter()
-        .map(|value| match *value {
+        .map(|value| match value {
             Value::Null => Ok(None),
             value => extract(value).map(Some),
         })
@@ -628,9 +679,16 @@ fn out_of_range(id: LogicalTypeId, value: impl std::fmt::Display) -> QuackError 
     ))
 }
 
+fn schema_shape(expected: &str, actual: &DataType) -> QuackError {
+    QuackError::protocol(format!(
+        "Arrow schema declares {actual} where {expected} is required"
+    ))
+}
+
 fn arrow_error(error: ArrowError) -> QuackError {
     QuackError::protocol(format!("arrow conversion failed: {error}"))
 }
+
 #[cfg(test)]
 mod tests {
     use arrow_array::cast::AsArray;
@@ -944,7 +1002,7 @@ mod tests {
 
         for logical_type in types {
             let declared = arrow_type(&logical_type).unwrap();
-            let built = build_array(&logical_type, &[]).unwrap();
+            let built = build_array(&logical_type, &declared, &[]).unwrap();
             assert_eq!(
                 built.data_type(),
                 &declared,
@@ -1195,6 +1253,55 @@ mod tests {
 
         assert!(
             matches!(&error, QuackError::Protocol(message) if message.contains("does not match")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn nested_columns_honour_the_schema_field_names() {
+        let chunk = data_chunk(vec![column(
+            LogicalTypes::list(LogicalTypes::integer()),
+            [Value::List(vec![Value::Int(1), Value::Int(2)])],
+            named("list_v"),
+        )])
+        .unwrap();
+        // Parquet and Spark name the list child "element" rather than "item";
+        // building against the schema's own field keeps either name working.
+        let item = Arc::new(Field::new("element", DataType::Int32, true));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "list_v",
+            DataType::List(item.clone()),
+            true,
+        )]));
+
+        let batch = to_record_batch(&chunk, &schema).unwrap();
+
+        assert_eq!(batch.schema(), schema);
+        assert_eq!(
+            batch.column(0).data_type(),
+            &DataType::List(item),
+            "the list child field must come from the schema"
+        );
+    }
+
+    #[test]
+    fn nested_columns_whose_schema_shape_disagrees_are_rejected() {
+        let chunk = data_chunk(vec![column(
+            LogicalTypes::list(LogicalTypes::integer()),
+            [Value::List(vec![Value::Int(1)])],
+            named("list_v"),
+        )])
+        .unwrap();
+        let schema = schema(&[ColumnDefinition {
+            name: "list_v".to_string(),
+            logical_type: LogicalTypes::varchar(),
+        }])
+        .unwrap();
+
+        let error = to_record_batch(&chunk, &schema).unwrap_err();
+
+        assert!(
+            matches!(&error, QuackError::Protocol(message) if message.contains("where List is required")),
             "unexpected error: {error}"
         );
     }
