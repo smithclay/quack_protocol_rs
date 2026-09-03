@@ -62,6 +62,53 @@ fn enum_type() -> LogicalType {
     ])
 }
 
+/// The physical shape DuckDB shreds a `VARIANT` into on the wire, as observed
+/// from a live `quack_serve`.
+fn variant_type() -> LogicalType {
+    logical_type_with_info(
+        LogicalTypeId::Variant,
+        ExtraTypeInfo::Struct {
+            alias: None,
+            child_types: vec![
+                ChildType {
+                    name: "keys".to_string(),
+                    logical_type: LogicalTypes::list(LogicalTypes::varchar()),
+                },
+                ChildType {
+                    name: "children".to_string(),
+                    logical_type: LogicalTypes::list(LogicalTypes::r#struct(vec![
+                        ChildType {
+                            name: "keys_index".to_string(),
+                            logical_type: LogicalTypes::uinteger(),
+                        },
+                        ChildType {
+                            name: "values_index".to_string(),
+                            logical_type: LogicalTypes::uinteger(),
+                        },
+                    ])),
+                },
+                ChildType {
+                    name: "values".to_string(),
+                    logical_type: LogicalTypes::list(LogicalTypes::r#struct(vec![
+                        ChildType {
+                            name: "type_id".to_string(),
+                            logical_type: LogicalTypes::utinyint(),
+                        },
+                        ChildType {
+                            name: "byte_offset".to_string(),
+                            logical_type: LogicalTypes::uinteger(),
+                        },
+                    ])),
+                },
+                ChildType {
+                    name: "data".to_string(),
+                    logical_type: LogicalTypes::blob(),
+                },
+            ],
+        },
+    )
+}
+
 fn point_type() -> LogicalType {
     LogicalTypes::r#struct(vec![
         ChildType {
@@ -314,6 +361,7 @@ fn build_array_and_arrow_type_agree_for_every_mapped_type() {
         LogicalTypes::array(LogicalTypes::integer(), 2),
         LogicalTypes::map(LogicalTypes::varchar(), LogicalTypes::integer()),
         point_type(),
+        variant_type(),
     ]);
 
     for logical_type in types {
@@ -570,6 +618,80 @@ fn value_variants_that_contradict_the_logical_type_are_rejected() {
     assert!(
         matches!(&error, QuackError::Protocol(message) if message.contains("does not match")),
         "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn variant_columns_pass_through_the_struct_duckdb_shreds_them_into() {
+    // `SELECT {'x': 1, 'y': 'two'}::VARIANT`, as a live quack_serve decodes it.
+    let variant = struct_value(vec![
+        (
+            "keys",
+            Value::List(vec![
+                Value::String("x".to_string()),
+                Value::String("y".to_string()),
+            ]),
+        ),
+        (
+            "children",
+            Value::List(vec![
+                struct_value(vec![
+                    ("keys_index", Value::UInt(0)),
+                    ("values_index", Value::UInt(1)),
+                ]),
+                struct_value(vec![
+                    ("keys_index", Value::UInt(1)),
+                    ("values_index", Value::UInt(2)),
+                ]),
+            ]),
+        ),
+        (
+            "values",
+            Value::List(vec![
+                struct_value(vec![
+                    ("type_id", Value::UInt(29)),
+                    ("byte_offset", Value::UInt(0)),
+                ]),
+                struct_value(vec![
+                    ("type_id", Value::UInt(5)),
+                    ("byte_offset", Value::UInt(2)),
+                ]),
+                struct_value(vec![
+                    ("type_id", Value::UInt(16)),
+                    ("byte_offset", Value::UInt(6)),
+                ]),
+            ]),
+        ),
+        (
+            "data",
+            Value::Bytes(vec![2, 0, 1, 0, 0, 0, 3, 116, 119, 111]),
+        ),
+    ]);
+    let chunk = data_chunk(vec![column(
+        variant_type(),
+        [variant, Value::Null],
+        named("variant_v"),
+    )])
+    .unwrap();
+
+    let batch = record_batch(&chunk);
+
+    let column = batch.column(0).as_struct();
+    assert_eq!(column.data_type(), &arrow_type(&variant_type()).unwrap());
+    let keys = column.column_by_name("keys").unwrap().as_list::<i32>();
+    assert_eq!(
+        keys.value(0).as_string::<i32>(),
+        &StringArray::from(vec!["x", "y"])
+    );
+    // A NULL variant is a null container, not a struct of empty children.
+    assert!(column.is_null(1));
+    assert_eq!(
+        column
+            .column_by_name("data")
+            .unwrap()
+            .as_binary::<i32>()
+            .value(0),
+        &[2, 0, 1, 0, 0, 0, 3, 116, 119, 111]
     );
 }
 

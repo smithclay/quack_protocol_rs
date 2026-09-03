@@ -166,7 +166,9 @@ pub(super) fn build_array(
             let (item, size) = fixed_size_list_item(data_type)?;
             build_fixed_size_list(logical_type, item, size, values)?
         }
-        LogicalTypeId::Struct => build_struct(logical_type, struct_children(data_type)?, values)?,
+        LogicalTypeId::Struct | LogicalTypeId::Variant => {
+            build_struct(logical_type, struct_children(data_type)?, values)?
+        }
         other => return Err(unsupported(other)),
     })
 }

@@ -14,9 +14,11 @@ use super::{HUGE_INT_PRECISION, UTC_TIMEZONE, unsupported};
 
 /// Maps a Quack logical type onto the Arrow type the bridge produces for it.
 ///
-/// Two mappings are provisional and may change in a future release: `MAP` is
-/// encoded as `List<Struct<key, value>>` rather than Arrow's native `Map`, and
-/// `ENUM` as plain `Utf8` rather than a `Dictionary`.
+/// Three mappings are provisional and may change in a future release: `MAP` is
+/// encoded as `List<Struct<key, value>>` rather than Arrow's native `Map`,
+/// `ENUM` as plain `Utf8` rather than a `Dictionary`, and `VARIANT` as the
+/// struct DuckDB shreds it into rather than Arrow's canonical `arrow.variant`
+/// extension, whose binary encoding is not the one DuckDB sends.
 pub(super) fn arrow_type(logical_type: &LogicalType) -> Result<DataType> {
     Ok(match logical_type.id {
         LogicalTypeId::SqlNull => DataType::Null,
@@ -58,7 +60,9 @@ pub(super) fn arrow_type(logical_type: &LogicalType) -> Result<DataType> {
         LogicalTypeId::Array => {
             DataType::FixedSizeList(list_item_field(logical_type)?, array_size(logical_type)?)
         }
-        LogicalTypeId::Struct => DataType::Struct(struct_fields(logical_type)?),
+        LogicalTypeId::Struct | LogicalTypeId::Variant => {
+            DataType::Struct(struct_fields(logical_type)?)
+        }
         other => return Err(unsupported(other)),
     })
 }

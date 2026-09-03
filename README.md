@@ -100,15 +100,21 @@ finish.
 | `LIST`, `MAP` | `List(child)` |
 | `ARRAY(n)` | `FixedSizeList(child, n)` |
 | `STRUCT` | `Struct(children)` |
+| `VARIANT` | `Struct(keys, children, values, data)` |
 
 Every field is nullable; the wire carries no non-null guarantee. A `NULL` list,
 array, or struct is a null container, not an empty one. `TIME` values must lie
 within one day, as Arrow requires, so DuckDB's `TIME '24:00:00'` is rejected.
-`TIMETZ`, `UNION`, and `VARIANT` have no Arrow mapping yet and produce
+`TIMETZ` and `UNION` have no Arrow mapping yet and produce
 `QuackError::UnsupportedType`.
 
-Two mappings are provisional and may change in a future release: `MAP` is
-encoded as `List<Struct<key, value>>` rather than Arrow's native `Map`, and
-`ENUM` as plain `Utf8` rather than a `Dictionary`.
+Three mappings are provisional and may change in a future release: `MAP` is
+encoded as `List<Struct<key, value>>` rather than Arrow's native `Map`, `ENUM`
+as plain `Utf8` rather than a `Dictionary`, and `VARIANT` as the struct DuckDB
+shreds it into rather than Arrow's canonical `arrow.variant` extension, whose
+binary encoding is not the one DuckDB sends. A `VARIANT` column therefore
+arrives as its physical layout — `keys`, `children`, `values`, and a `data`
+blob — the same shape the `Value` path already exposes, and reading a value
+back out of it means interpreting that encoding yourself.
 
 Quack is still experimental upstream and not yet covered by a stable official wire spec. This implementation follows DuckDB's `duckdb-quack` extension.

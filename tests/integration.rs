@@ -1070,6 +1070,48 @@ mod arrow_output {
     }
 
     #[tokio::test]
+    async fn live_quack_arrow_passes_variant_through_as_a_struct() -> Result<()> {
+        let Some(client) = live_client().await? else {
+            return Ok(());
+        };
+
+        let (schema, batches) = client
+            .query("SELECT {'x': 1, 'y': 'two'}::VARIANT AS variant_v", None)
+            .await?
+            .into_record_batches()?;
+        let batches: Vec<RecordBatch> = batches.try_collect().await?;
+
+        // VARIANT arrives as the struct DuckDB shreds it into, the same shape
+        // the Value path already exposes.
+        let DataType::Struct(fields) = schema.field(0).data_type() else {
+            panic!("VARIANT should map to a struct, got {:?}", schema.field(0));
+        };
+        assert_eq!(
+            fields.iter().map(|field| field.name()).collect::<Vec<_>>(),
+            ["keys", "children", "values", "data"]
+        );
+
+        let column = batches[0].column(0).as_struct();
+        let keys = column.column_by_name("keys").unwrap().as_list::<i32>();
+        assert_eq!(
+            keys.value(0).as_string::<i32>(),
+            &StringArray::from(vec!["x", "y"])
+        );
+        assert!(
+            !column
+                .column_by_name("data")
+                .unwrap()
+                .as_binary::<i32>()
+                .value(0)
+                .is_empty(),
+            "the variant payload should carry its encoded data"
+        );
+
+        client.disconnect().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn live_quack_arrow_rejects_unsupported_types() -> Result<()> {
         let Some(client) = live_client().await? else {
             return Ok(());
