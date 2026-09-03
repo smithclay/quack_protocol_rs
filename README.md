@@ -105,7 +105,7 @@ finish.
 Every field is nullable; the wire carries no non-null guarantee. A `NULL` list,
 array, or struct is a null container, not an empty one. `TIME` values must lie
 within one day, as Arrow requires, so DuckDB's `TIME '24:00:00'` is rejected.
-`TIMETZ`, `UNION`, and `VARINT` have no Arrow mapping yet and produce
+`TIMETZ`, `UNION`, and `VARIANT` have no Arrow mapping yet and produce
 `QuackError::UnsupportedType`.
 
 Two mappings are provisional and may change in a future release: `MAP` is

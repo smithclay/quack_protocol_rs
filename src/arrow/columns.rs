@@ -40,7 +40,14 @@ pub(super) fn build_array(
 ) -> Result<ArrayRef> {
     let id = logical_type.id;
     Ok(match id {
-        LogicalTypeId::SqlNull => Arc::new(NullArray::new(values.len())),
+        LogicalTypeId::SqlNull => {
+            // A SQLNULL column carries nothing but nulls; a decoded value in
+            // one would otherwise be dropped on the floor by `NullArray`.
+            if let Some(value) = values.iter().find(|value| !matches!(value, Value::Null)) {
+                return Err(mismatch(id, value));
+            }
+            Arc::new(NullArray::new(values.len()))
+        }
         LogicalTypeId::Boolean => Arc::new(boolean(values, |value| as_bool(id, value))?),
         LogicalTypeId::TinyInt => Arc::new(primitive::<Int8Type>(values, |value| {
             narrow_int(id, value)
@@ -235,14 +242,6 @@ fn build_struct(
     fields: &Fields,
     values: &[&Value],
 ) -> Result<ArrayRef> {
-    let mut validity = Vec::with_capacity(values.len());
-    for value in values {
-        match *value {
-            Value::Null => validity.push(false),
-            Value::Struct(_) => validity.push(true),
-            other => return Err(mismatch(logical_type.id, other)),
-        }
-    }
     let children = get_struct_children(logical_type)?;
     if children.len() != fields.len() {
         return Err(QuackError::protocol(format!(
@@ -251,20 +250,50 @@ fn build_struct(
             fields.len()
         )));
     }
+    let mut validity = Vec::with_capacity(values.len());
+    for value in values {
+        match *value {
+            Value::Null => validity.push(false),
+            Value::Struct(row) => {
+                // Field names are unique, so matching the arity here and each
+                // declared name below together reject a struct carrying an
+                // undeclared field.
+                if row.len() != children.len() {
+                    return Err(QuackError::protocol(format!(
+                        "STRUCT value has {} fields but the type declares {}",
+                        row.len(),
+                        children.len()
+                    )));
+                }
+                validity.push(true);
+            }
+            other => return Err(mismatch(logical_type.id, other)),
+        }
+    }
     let mut arrays = Vec::with_capacity(children.len());
     for (child_index, (child, field)) in zip(children, fields).enumerate() {
         // The decoder inserts struct fields in child order, so the positional
-        // lookup hits and the lookup by name is only a fallback.
+        // lookup hits and the lookup by name is only a fallback. A declared
+        // child absent from a present struct is a decoder-invariant violation,
+        // not an implicit null.
         let child_values = values
             .iter()
             .map(|value| match *value {
                 Value::Struct(row) => match row.get_index(child_index) {
-                    Some((name, value)) if name == &child.name => value,
-                    _ => row.get(&child.name).unwrap_or(&NULL_VALUE),
+                    Some((name, value)) if name == &child.name => Ok(value),
+                    _ => row.get(&child.name).ok_or_else(|| {
+                        QuackError::protocol(format!(
+                            "STRUCT value has no field named {:?}",
+                            child.name
+                        ))
+                    }),
                 },
-                _ => &NULL_VALUE,
+                // Only a null parent reaches here; the pass above rejected
+                // every other variant. Its child slots are null and masked by
+                // the parent's validity bit.
+                _ => Ok(&NULL_VALUE),
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         arrays.push(build_array(
             &child.logical_type,
             field.data_type(),

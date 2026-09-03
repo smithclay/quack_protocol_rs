@@ -572,6 +572,67 @@ fn value_variants_that_contradict_the_logical_type_are_rejected() {
 }
 
 #[test]
+fn values_in_a_sqlnull_column_are_rejected() {
+    let chunk = data_chunk(vec![column(
+        LogicalTypes::null(),
+        [Value::Int(7)],
+        named("null_v"),
+    )])
+    .unwrap();
+    let schema = schema(&definitions(&chunk)).unwrap();
+
+    let error = to_record_batch(&chunk, &schema).unwrap_err();
+
+    assert!(
+        matches!(&error, QuackError::Protocol(message) if message.contains("does not match")),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn structs_missing_a_declared_field_are_rejected() {
+    let chunk = data_chunk(vec![column(
+        point_type(),
+        [struct_value(vec![
+            ("x", Value::Int(1)),
+            ("z", Value::String("wrong name".to_string())),
+        ])],
+        named("point_v"),
+    )])
+    .unwrap();
+    let schema = schema(&definitions(&chunk)).unwrap();
+
+    let error = to_record_batch(&chunk, &schema).unwrap_err();
+
+    assert!(
+        matches!(&error, QuackError::Protocol(message) if message.contains("no field named \"y\"")),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn structs_carrying_an_undeclared_field_are_rejected() {
+    let chunk = data_chunk(vec![column(
+        point_type(),
+        [struct_value(vec![
+            ("x", Value::Int(1)),
+            ("y", Value::String("here".to_string())),
+            ("z", Value::Int(2)),
+        ])],
+        named("point_v"),
+    )])
+    .unwrap();
+    let schema = schema(&definitions(&chunk)).unwrap();
+
+    let error = to_record_batch(&chunk, &schema).unwrap_err();
+
+    assert!(
+        matches!(&error, QuackError::Protocol(message) if message.contains("has 3 fields but the type declares 2")),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn nested_columns_honour_the_schema_field_names() {
     let chunk = data_chunk(vec![column(
         LogicalTypes::list(LogicalTypes::integer()),
