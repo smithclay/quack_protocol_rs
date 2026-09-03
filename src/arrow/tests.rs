@@ -14,10 +14,12 @@ use arrow_schema::{Field, Fields};
 use indexmap::IndexMap;
 
 use super::columns::build_array;
+use super::schema::arrow_type;
 use super::*;
 use crate::builders::{column, data_chunk};
+use crate::logical_types::ExtraTypeInfo;
 use crate::logical_types::LogicalType;
-use crate::logical_types::{ChildType, LogicalTypes};
+use crate::logical_types::{ChildType, LogicalTypeId, LogicalTypes, logical_type_with_info};
 use crate::values::{date_value, decimal_value, interval_value, time_value, timestamp_value};
 use crate::vector::{TimeUnit, TimestampUnit};
 

@@ -70,10 +70,9 @@ async fn main() -> Result<()> {
 }
 ```
 
-`quack_protocol::arrow` also exposes `schema()` and `to_record_batch()` for
-converting chunks by hand, plus `arrow_type()` for the `LogicalType` mapping.
-The `arrow-array`, `arrow-buffer`, and `arrow-schema` crates are re-exported so
-downstream code can match versions.
+`into_record_batches()` is the whole entry point. `quack_protocol::arrow`
+otherwise only re-exports the `arrow-array`, `arrow-buffer`, and `arrow-schema`
+crates, so downstream code can match versions.
 
 The batch stream holds the client's connection until it is drained or dropped,
 as `into_chunks()` and `into_rows()` do: a `QuackClient` runs one query at a

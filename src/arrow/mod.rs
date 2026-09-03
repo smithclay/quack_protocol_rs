@@ -4,6 +4,10 @@
 //! [`arrow_array::RecordBatch`] using the column
 //! [`LogicalType`](crate::LogicalType)s, so the wire codecs are untouched. It
 //! is gated behind the `arrow` feature.
+//!
+//! [`QuackResultStream::into_record_batches`] is the entry point; the module
+//! otherwise only re-exports the `arrow-rs` crates the bridge builds against,
+//! so a caller can match their versions.
 
 mod columns;
 mod schema;
@@ -32,8 +36,6 @@ pub use arrow_array;
 pub use arrow_buffer;
 pub use arrow_schema;
 
-pub use self::schema::arrow_type;
-
 const HUGE_INT_PRECISION: u8 = 39;
 const UTC_TIMEZONE: &str = "UTC";
 
@@ -41,7 +43,7 @@ const UTC_TIMEZONE: &str = "UTC";
 ///
 /// The definitions come from prepare time, so the schema is available even for
 /// results that carry no chunks at all.
-pub fn schema(columns: &[ColumnDefinition]) -> Result<SchemaRef> {
+fn schema(columns: &[ColumnDefinition]) -> Result<SchemaRef> {
     let fields = columns
         .iter()
         .map(|column| field(&column.name, &column.logical_type))
@@ -52,7 +54,7 @@ pub fn schema(columns: &[ColumnDefinition]) -> Result<SchemaRef> {
 /// Converts a decoded chunk into a [`RecordBatch`] with the given schema.
 ///
 /// Returns an error if the chunk's column types do not match the schema.
-pub fn to_record_batch(chunk: &DataChunk, schema: &SchemaRef) -> Result<RecordBatch> {
+fn to_record_batch(chunk: &DataChunk, schema: &SchemaRef) -> Result<RecordBatch> {
     if chunk.types.len() != schema.fields().len() {
         return Err(QuackError::protocol(format!(
             "DataChunk has {} columns but the Arrow schema declares {}",

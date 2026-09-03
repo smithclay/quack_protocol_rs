@@ -17,7 +17,7 @@ use super::{HUGE_INT_PRECISION, UTC_TIMEZONE, unsupported};
 /// Two mappings are provisional and may change in a future release: `MAP` is
 /// encoded as `List<Struct<key, value>>` rather than Arrow's native `Map`, and
 /// `ENUM` as plain `Utf8` rather than a `Dictionary`.
-pub fn arrow_type(logical_type: &LogicalType) -> Result<DataType> {
+pub(super) fn arrow_type(logical_type: &LogicalType) -> Result<DataType> {
     Ok(match logical_type.id {
         LogicalTypeId::SqlNull => DataType::Null,
         LogicalTypeId::Boolean => DataType::Boolean,
