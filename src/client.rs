@@ -19,6 +19,9 @@ use crate::vector::{DataChunk, Row, Value, rows_from_chunk_with_names};
 
 const DEFAULT_QUACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_QUACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+// A DISCONNECT sent from `Drop` runs detached, with no caller left to observe
+// it, so it is not given the full request timeout to hang around for.
+const DISCONNECT_ON_DROP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ParsedQuackUri {
@@ -73,7 +76,10 @@ pub struct QuackResultStream {
 }
 
 impl QuackResultStream {
-    fn new(columns: Vec<ColumnDefinition>, chunks: BoxStream<'static, Result<DataChunk>>) -> Self {
+    pub(crate) fn new(
+        columns: Vec<ColumnDefinition>,
+        chunks: BoxStream<'static, Result<DataChunk>>,
+    ) -> Self {
         Self {
             columns,
             inner: chunks,
@@ -99,6 +105,44 @@ impl QuackResultStream {
             .boxed();
         (self.columns, rows)
     }
+
+    // Consuming helpers shared by `QuackClient` and `QuackPool`; both drain the
+    // stream, which releases the connection.
+    pub(crate) async fn drain(self) -> Result<()> {
+        let (_, chunks) = self.into_chunks();
+        chunks.try_for_each(|_| async { Ok(()) }).await
+    }
+
+    pub(crate) async fn first_row(self) -> Result<Option<Row>> {
+        let (_, rows) = self.into_rows();
+        let rows: Vec<_> = rows.try_collect().await?;
+        Ok(rows.into_iter().next())
+    }
+
+    pub(crate) async fn one_row(self) -> Result<Row> {
+        let (_, rows) = self.into_rows();
+        let rows: Vec<_> = rows.try_collect().await?;
+        if rows.len() != 1 {
+            return Err(QuackError::protocol(format!(
+                "expected exactly one row, got {}",
+                rows.len()
+            )));
+        }
+        Ok(rows.into_iter().next().expect("one row"))
+    }
+
+    pub(crate) async fn first_column(self) -> Result<Vec<Value>> {
+        let (columns, rows) = self.into_rows();
+        let rows: Vec<_> = rows.try_collect().await?;
+        let first_name = match columns.first() {
+            Some(col) => &col.name,
+            None => return Ok(Vec::new()),
+        };
+        Ok(rows
+            .into_iter()
+            .map(|mut row| row.shift_remove(first_name).unwrap_or(Value::Null))
+            .collect())
+    }
 }
 
 struct FetchState {
@@ -110,29 +154,36 @@ struct FetchState {
     rows_delivered: usize,
 }
 
+/// One session on a Quack server.
+///
+/// A `QuackClient` maps to exactly one server-side connection id for its whole
+/// lifetime, clones included - they share one `Arc`. That has two consequences
+/// worth designing around:
+///
+/// - **Queries are serialized.** The server keeps one resumable result cursor
+///   per connection id, and a PREPARE resets it, which would invalidate a FETCH
+///   still in flight. Queries therefore take a mutex, and a result stream holds
+///   it until the stream is drained or dropped. Cloning the client does not
+///   change this: concurrent queries need [`QuackPool`](crate::QuackPool),
+///   which spreads them over several sessions.
+/// - **Session state persists.** Temporary tables, `SET`, transactions, and
+///   attached databases live on the connection, so consecutive calls on one
+///   client see each other's effects.
+///
+/// Dropping the last clone closes the server-side session on a background
+/// task, best-effort; [`disconnect`](Self::disconnect) closes it
+/// deterministically and reports whether that worked.
 #[derive(Clone, Debug)]
 pub struct QuackClient {
-    // Holds connection to Quack server.
-    //
-    // Server holds a resumable cursor for result-streaming per unique
-    // connection_id, and a `QuackClient` (its clones included, since they
-    // share this `Arc`) maps to exactly one connection_id for its whole
-    // lifetime. A concurrent PREPARE (e.g. from another query on this
-    // connection_id) resets the cursor, invalidating a FETCH still in
-    // progress. Connection is wrapped in Mutex to ensure queries are
-    // executed serially on server.
-    //
-    // TODO: support concurrent queries to quack server by introducing
-    // a connection pool
-    //
-    // TODO: close message is not issued to Quack server when `Connection` is
-    // dropped. Server retains the cursor for the dropped connection_id.
     connection: Arc<Mutex<Connection>>,
+    // Also held by the `Connection` itself, so status stays readable while a
+    // result stream holds the mutex.
+    state: Arc<ConnectionState>,
     pub info: Option<QuackConnectionInfo>,
 }
 
 impl QuackClient {
-    pub async fn connect(uri: &str, options: QuackClientOptions) -> Result<Self> {
+    pub async fn connect(uri: &str, mut options: QuackClientOptions) -> Result<Self> {
         let parsed = parse_quack_uri(uri, options.ssl)?;
         let timeout = options.timeout.unwrap_or(DEFAULT_QUACK_REQUEST_TIMEOUT);
         let http = reqwest::Client::builder()
@@ -140,27 +191,33 @@ impl QuackClient {
             .pool_max_idle_per_host(0)
             .timeout(timeout)
             .build()?;
-        let base_url = parsed.base_url.trim_end_matches('/').to_string();
-        let (connection, info) = Connection::connect(base_url, http, timeout, options).await?;
+        let transport = Transport {
+            base_url: parsed.base_url.trim_end_matches('/').to_string(),
+            http,
+            headers: std::mem::take(&mut options.headers),
+            timeout,
+        };
+        let (connection, info) = Connection::connect(transport, options).await?;
 
         Ok(Self {
+            state: Arc::clone(&connection.state),
             connection: Arc::new(Mutex::new(connection)),
             info: Some(info),
         })
     }
 
     pub fn is_connected(&self) -> bool {
-        match self.connection.try_lock() {
-            Ok(guard) => !guard.closed.load(Ordering::Relaxed),
-            // Something's actively using the connection, so it can't be closed yet -
-            // closing requires this same lock.
-            Err(_) => true,
-        }
+        !self.state.closed.load(Ordering::Relaxed)
+    }
+
+    // Whether a pool may hand this connection to the next caller: still open,
+    // and no wire failure has been seen on it.
+    pub(crate) fn is_reusable(&self) -> bool {
+        self.state.is_reusable()
     }
 
     pub async fn execute(&self, sql: &str, metadata: Option<&QueryMetadata>) -> Result<()> {
-        let (_, chunks) = self.query_inner(sql, None, metadata).await?.into_chunks();
-        chunks.try_for_each(|_| async { Ok(()) }).await
+        self.query_inner(sql, None, metadata).await?.drain().await
     }
 
     pub async fn query(
@@ -181,7 +238,7 @@ impl QuackClient {
 
     // Execute a SQL query on Quack server and stream results via repeated
     // FETCH calls to server.
-    async fn query_inner(
+    pub(crate) async fn query_inner(
         &self,
         sql: &str,
         params: Option<&SqlParameters>,
@@ -326,37 +383,15 @@ impl QuackClient {
     }
 
     pub async fn first(&self, sql: &str) -> Result<Option<Row>> {
-        let (_, rows) = self.query(sql, None).await?.into_rows();
-        let rows: Vec<_> = rows.try_collect().await?;
-
-        Ok(rows.into_iter().next())
+        self.query(sql, None).await?.first_row().await
     }
 
     pub async fn one(&self, sql: &str) -> Result<Row> {
-        let (_, rows) = self.query(sql, None).await?.into_rows();
-        let rows: Vec<_> = rows.try_collect().await?;
-
-        if rows.len() != 1 {
-            return Err(QuackError::protocol(format!(
-                "expected exactly one row, got {}",
-                rows.len()
-            )));
-        }
-        Ok(rows.into_iter().next().expect("one row"))
+        self.query(sql, None).await?.one_row().await
     }
 
     pub async fn values(&self, sql: &str) -> Result<Vec<Value>> {
-        let (columns, rows) = self.query(sql, None).await?.into_rows();
-        let rows: Vec<_> = rows.try_collect().await?;
-
-        let first_name = match columns.first() {
-            Some(col) => &col.name,
-            None => return Ok(Vec::new()),
-        };
-        Ok(rows
-            .into_iter()
-            .map(|mut row| row.shift_remove(first_name).unwrap_or(Value::Null))
-            .collect())
+        self.query(sql, None).await?.first_column().await
     }
 
     pub async fn append(
@@ -398,6 +433,13 @@ impl QuackClient {
         Ok(())
     }
 
+    /// Close the server-side session, releasing its cursor and session state.
+    ///
+    /// Waits for any in-flight query to finish, since it takes the same lock.
+    /// Dropping the client does the same thing on a detached task, but a
+    /// detached task only runs while the Tokio runtime is alive; call this when
+    /// the session must be closed before the program moves on, and to see
+    /// whether closing succeeded.
     pub async fn disconnect(&self) -> Result<()> {
         self.connection.lock().await.disconnect().await
     }
@@ -407,34 +449,75 @@ impl QuackClient {
     }
 }
 
-#[derive(Debug)]
-struct Connection {
+// Connection status, shared with the owning `QuackClient` so it can be read
+// without taking the connection mutex.
+#[derive(Debug, Default)]
+struct ConnectionState {
+    closed: AtomicBool,
+    degraded: AtomicBool,
+}
+
+impl ConnectionState {
+    fn is_reusable(&self) -> bool {
+        !self.closed.load(Ordering::Relaxed) && !self.degraded.load(Ordering::Relaxed)
+    }
+}
+
+// Everything needed to talk to the server, minus the session. Cheap to clone -
+// `reqwest::Client` is itself a handle - so a dropped connection can hand it to
+// the background task that sends its DISCONNECT.
+#[derive(Clone, Debug)]
+struct Transport {
     base_url: String,
     http: reqwest::Client,
     headers: HeaderMap,
     timeout: Duration,
+}
+
+impl Transport {
+    async fn send(&self, message: &QuackMessage) -> Result<QuackMessage> {
+        let bytes = encode_message(message)?;
+        let mut request = self
+            .http
+            .post(format!("{}{}", self.base_url, QUACK_ENDPOINT))
+            .header(ACCEPT, HeaderValue::from_static(DUCKDB_MIME_TYPE))
+            .header(CONTENT_TYPE, HeaderValue::from_static(DUCKDB_MIME_TYPE))
+            .body(bytes);
+        if !self.headers.is_empty() {
+            request = request.headers(self.headers.clone());
+        }
+        request = request.timeout(self.timeout);
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(QuackError::protocol(format!(
+                "Quack HTTP request failed with {} {}",
+                response.status().as_u16(),
+                response.status().canonical_reason().unwrap_or("")
+            )));
+        }
+        let bytes = response.bytes().await?;
+        let decoded = decode_message(&bytes)?;
+        if let QuackMessage::ErrorResponse { message, .. } = decoded {
+            return Err(QuackError::server(message));
+        }
+        Ok(decoded)
+    }
+}
+
+#[derive(Debug)]
+struct Connection {
+    transport: Transport,
+    state: Arc<ConnectionState>,
     connection_id: String,
     query_counter: AtomicU64,
-    closed: AtomicBool,
 }
 
 impl Connection {
     async fn connect(
-        base_url: String,
-        http: reqwest::Client,
-        timeout: Duration,
+        transport: Transport,
         options: QuackClientOptions,
     ) -> Result<(Self, QuackConnectionInfo)> {
-        let connection = Self {
-            base_url,
-            http,
-            headers: options.headers,
-            timeout,
-            connection_id: String::new(),
-            query_counter: AtomicU64::new(1),
-            closed: AtomicBool::new(false),
-        };
-        let response = connection
+        let response = transport
             .send(&QuackMessage::ConnectionRequest {
                 header: MessageHeader::new(MessageType::ConnectionRequest),
                 auth_string: options.auth_token,
@@ -470,8 +553,10 @@ impl Connection {
                 };
                 Ok((
                     Self {
+                        transport,
+                        state: Arc::new(ConnectionState::default()),
                         connection_id,
-                        ..connection
+                        query_counter: AtomicU64::new(1),
                     },
                     info,
                 ))
@@ -483,32 +568,16 @@ impl Connection {
         }
     }
 
+    // Records wire failures against the session before returning them, so a
+    // pool can retire the connection instead of handing it on.
     async fn send(&self, message: &QuackMessage) -> Result<QuackMessage> {
-        let bytes = encode_message(message)?;
-        let mut request = self
-            .http
-            .post(format!("{}{}", self.base_url, QUACK_ENDPOINT))
-            .header(ACCEPT, HeaderValue::from_static(DUCKDB_MIME_TYPE))
-            .header(CONTENT_TYPE, HeaderValue::from_static(DUCKDB_MIME_TYPE))
-            .body(bytes);
-        if !self.headers.is_empty() {
-            request = request.headers(self.headers.clone());
+        let result = self.transport.send(message).await;
+        if let Err(err) = &result {
+            if err.is_connection_fatal() {
+                self.state.degraded.store(true, Ordering::Relaxed);
+            }
         }
-        request = request.timeout(self.timeout);
-        let response = request.send().await?;
-        if !response.status().is_success() {
-            return Err(QuackError::protocol(format!(
-                "Quack HTTP request failed with {} {}",
-                response.status().as_u16(),
-                response.status().canonical_reason().unwrap_or("")
-            )));
-        }
-        let bytes = response.bytes().await?;
-        let decoded = decode_message(&bytes)?;
-        if let QuackMessage::ErrorResponse { message, .. } = decoded {
-            return Err(QuackError::server(message));
-        }
-        Ok(decoded)
+        result
     }
 
     async fn prepare(&self, sql: &str) -> Result<QuackMessage> {
@@ -555,7 +624,7 @@ impl Connection {
         };
         let response = self.send(&message).await?;
         expect_success(response)?;
-        self.closed.store(true, Ordering::Relaxed);
+        self.state.closed.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -567,11 +636,47 @@ impl Connection {
     }
 
     fn ensure_open(&self) -> Result<()> {
-        if self.closed.load(Ordering::Relaxed) {
+        if self.state.closed.load(Ordering::Relaxed) {
             Err(QuackError::protocol("Quack client is not connected"))
         } else {
             Ok(())
         }
+    }
+}
+
+// Best-effort session cleanup: without a DISCONNECT the server keeps the
+// session - and its result cursor - for the connection id we are about to
+// forget. `Drop` cannot await, so the message goes out on a detached task,
+// which means it is delivered only while the Tokio runtime outlives the drop.
+// `QuackClient::disconnect` remains the deterministic path.
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if self.state.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        let connection_id = self.connection_id.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::debug!(
+                connection_id,
+                "quack session dropped outside a Tokio runtime; server session left open"
+            );
+            return;
+        };
+        let message = QuackMessage::Disconnect {
+            header: self.scoped_header(MessageType::DisconnectMessage),
+        };
+        let mut transport = self.transport.clone();
+        transport.timeout = transport.timeout.min(DISCONNECT_ON_DROP_TIMEOUT);
+        runtime.spawn(async move {
+            match transport.send(&message).await {
+                Ok(_) => tracing::debug!(connection_id, "quack session closed on drop"),
+                Err(err) => tracing::debug!(
+                    connection_id,
+                    %err,
+                    "quack DISCONNECT on drop failed; server session left open"
+                ),
+            }
+        });
     }
 }
 
@@ -692,11 +797,92 @@ fn expect_success(response: QuackMessage) -> Result<()> {
 mod tests {
     use super::*;
 
+    // A connection whose session was never negotiated: enough to exercise
+    // `Drop`, the one path here that runs without a Quack server.
+    fn test_connection(base_url: &str) -> Connection {
+        Connection {
+            transport: Transport {
+                base_url: base_url.to_string(),
+                http: reqwest::Client::new(),
+                headers: HeaderMap::new(),
+                timeout: Duration::from_millis(500),
+            },
+            state: Arc::new(ConnectionState::default()),
+            connection_id: "test-connection".to_string(),
+            query_counter: AtomicU64::new(1),
+        }
+    }
+
+    // A socket that reports whether anything tried to reach it, so the
+    // background DISCONNECT can be observed without a Quack server.
+    fn listening_socket() -> (std::net::TcpListener, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+        (listener, base_url)
+    }
+
+    async fn connected_within(listener: &std::net::TcpListener, window: Duration) -> bool {
+        let deadline = Instant::now() + window;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok(_) => return true,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("accept failed: {err}"),
+            }
+        }
+        false
+    }
+
     #[test]
     fn default_options_have_request_timeout() {
         assert_eq!(
             QuackClientOptions::default().timeout,
             Some(DEFAULT_QUACK_REQUEST_TIMEOUT)
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_an_open_connection_sends_a_disconnect() {
+        let (listener, base_url) = listening_socket();
+        drop(test_connection(&base_url));
+        assert!(
+            connected_within(&listener, Duration::from_secs(5)).await,
+            "dropping an open session should send a DISCONNECT"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_a_closed_connection_sends_nothing() {
+        let (listener, base_url) = listening_socket();
+        let connection = test_connection(&base_url);
+        connection.state.closed.store(true, Ordering::Relaxed);
+        drop(connection);
+        assert!(
+            !connected_within(&listener, Duration::from_millis(300)).await,
+            "a disconnected session should not be closed twice"
+        );
+    }
+
+    #[test]
+    fn dropping_a_connection_without_a_runtime_is_harmless() {
+        // Nothing to spawn the DISCONNECT on, so it is skipped rather than
+        // taking the caller down with it.
+        drop(test_connection("http://127.0.0.1:1"));
+    }
+
+    #[test]
+    fn dropping_a_connection_as_the_runtime_shuts_down_is_harmless() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let connection = test_connection("http://127.0.0.1:1");
+        runtime.spawn(async move {
+            let _connection = connection;
+            std::future::pending::<()>().await;
+        });
+        // Cancels the task, so the connection is dropped from inside a runtime
+        // that is already going away.
+        drop(runtime);
     }
 }
