@@ -174,6 +174,8 @@ pub(super) fn build_array(
 }
 
 fn build_list(logical_type: &LogicalType, item: &FieldRef, values: &[&Value]) -> Result<ArrayRef> {
+    // LIST and MAP share this builder, so the errors name the column's own type.
+    let id = logical_type.id;
     let mut offsets = Vec::with_capacity(values.len() + 1);
     let mut validity = Vec::with_capacity(values.len());
     let mut items = Vec::with_capacity(values.len());
@@ -185,10 +187,12 @@ fn build_list(logical_type: &LogicalType, item: &FieldRef, values: &[&Value]) ->
                 items.extend(entries.iter());
                 validity.push(true);
             }
-            other => return Err(mismatch(logical_type.id, other)),
+            other => return Err(mismatch(id, other)),
         }
         offsets.push(i32::try_from(items.len()).map_err(|_| {
-            QuackError::protocol("LIST column exceeds the Arrow 32-bit offset limit")
+            QuackError::protocol(format!(
+                "{id:?} column exceeds the Arrow 32-bit offset limit"
+            ))
         })?);
     }
     let child = build_array(get_child_type(logical_type)?, item.data_type(), &items)?;
@@ -244,10 +248,13 @@ fn build_struct(
     fields: &Fields,
     values: &[&Value],
 ) -> Result<ArrayRef> {
+    // STRUCT and VARIANT share this builder, so the errors name the column's
+    // own type.
+    let id = logical_type.id;
     let children = get_struct_children(logical_type)?;
     if children.len() != fields.len() {
         return Err(QuackError::protocol(format!(
-            "STRUCT has {} children but the Arrow schema declares {}",
+            "{id:?} has {} children but the Arrow schema declares {}",
             children.len(),
             fields.len()
         )));
@@ -262,14 +269,14 @@ fn build_struct(
                 // undeclared field.
                 if row.len() != children.len() {
                     return Err(QuackError::protocol(format!(
-                        "STRUCT value has {} fields but the type declares {}",
+                        "{id:?} value has {} fields but the type declares {}",
                         row.len(),
                         children.len()
                     )));
                 }
                 validity.push(true);
             }
-            other => return Err(mismatch(logical_type.id, other)),
+            other => return Err(mismatch(id, other)),
         }
     }
     let mut arrays = Vec::with_capacity(children.len());
@@ -285,7 +292,7 @@ fn build_struct(
                     Some((name, value)) if name == &child.name => Ok(value),
                     _ => row.get(&child.name).ok_or_else(|| {
                         QuackError::protocol(format!(
-                            "STRUCT value has no field named {:?}",
+                            "{id:?} value has no field named {:?}",
                             child.name
                         ))
                     }),

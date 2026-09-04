@@ -757,6 +757,29 @@ fn structs_carrying_an_undeclared_field_are_rejected() {
 }
 
 #[test]
+fn errors_name_the_column_type_rather_than_the_builder() {
+    // VARIANT shares its builder with STRUCT, so the error has to name VARIANT.
+    let chunk = data_chunk(vec![column(
+        variant_type(),
+        [struct_value(vec![
+            ("keys", Value::List(vec![])),
+            ("data", Value::Bytes(vec![])),
+        ])],
+        named("variant_v"),
+    )])
+    .unwrap();
+    let schema = schema(&definitions(&chunk)).unwrap();
+
+    let error = to_record_batch(&chunk, &schema).unwrap_err();
+
+    assert!(
+        matches!(&error, QuackError::Protocol(message) if message
+            .contains("Variant value has 2 fields but the type declares 4")),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn nested_columns_honour_the_schema_field_names() {
     let chunk = data_chunk(vec![column(
         LogicalTypes::list(LogicalTypes::integer()),
